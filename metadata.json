@@ -1,0 +1,10 @@
+{
+  "name": "Remix Remix Al-Basmi Orth 3",
+  "description": "Tablet-first offline-capable orthodontic clinical management, cephalometric analysis, diagnostic decision-support, longitudinal case tracking, and bilingual (Arabic/English) scientific reporting platform.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
