@@ -9,6 +9,8 @@ import {
   EyeOff,
   Eye,
   BookOpen,
+  FileText,
+  ExternalLink,
 } from 'lucide-react';
 import {
   LanguageMode,
@@ -32,7 +34,7 @@ import {
   formatSkeletalVertical,
   formatTimepointStage,
 } from '../utils/i18n';
-import { CephTracingCanvas, ClinicalRecordIllustration } from './CephTracingCanvas';
+import { CephTracingCanvas } from './CephTracingCanvas';
 
 export type ReportTemplatePreset =
   | 'Comprehensive Case Report'
@@ -161,6 +163,18 @@ export const ReportEngineView: React.FC<ReportEngineViewProps> = ({
   const t3Ceph = orthoCase.cephRecords.find((r) => r.stage === 'T3_Final');
   const caseReferences = references.filter((r) => orthoCase.referencesIds.includes(r.id));
 
+  const extraoralPhotos = orthoCase.photos.filter((p) => p.category.startsWith('Extraoral'));
+  const intraoralPhotos = orthoCase.photos.filter((p) => p.category.startsWith('Intraoral') || p.category.includes('Occlusal'));
+  const radiographicPhotos = orthoCase.photos.filter((p) =>
+    p.category.includes('Ceph') ||
+    p.category.includes('X-Ray') ||
+    p.category.includes('CBCT') ||
+    p.category.includes('Panoramic') ||
+    p.category.includes('Report') ||
+    p.category.includes('PDF') ||
+    p.dataUrl?.startsWith('data:application/pdf')
+  );
+
   const displayPatientName = anonymizeForConference
     ? language === 'ar'
       ? `حالة علمية مغفلة الهوية [${orthoCase.id}]`
@@ -168,6 +182,56 @@ export const ReportEngineView: React.FC<ReportEngineViewProps> = ({
     : language === 'ar'
     ? patient.fullNameAr
     : patient.fullNameEn;
+
+  const renderMediaPreview = (
+    ph: typeof orthoCase.photos[0],
+    aspectClass: string = 'aspect-[4/3]'
+  ) => {
+    const isPdf =
+      ph.dataUrl?.startsWith('data:application/pdf') ||
+      ph.category.includes('PDF') ||
+      ph.category.includes('Report') ||
+      ph.captionEn?.toLowerCase().endsWith('.pdf');
+
+    return (
+      <div className={`${aspectClass} rounded overflow-hidden bg-slate-950 flex items-center justify-center relative`}>
+        {isPdf ? (
+          <div className="w-full h-full flex flex-col items-center justify-center p-3 text-center bg-slate-900 border border-slate-800">
+            <div className="w-9 h-9 rounded-lg bg-rose-500/20 text-rose-400 border border-rose-500/30 flex items-center justify-center mb-1 shadow-2xs">
+              <FileText className="w-5 h-5" />
+            </div>
+            <span className="text-[9px] font-mono font-bold text-rose-300 bg-rose-950/80 px-2 py-0.5 rounded border border-rose-800 uppercase">
+              PDF REPORT / DOCUMENT
+            </span>
+            <p className="text-[10px] text-slate-300 mt-1 line-clamp-1 max-w-[190px]">
+              {language === 'ar' ? ph.captionAr : ph.captionEn}
+            </p>
+            {ph.dataUrl && (
+              <a
+                href={ph.dataUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-flex items-center gap-1 px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold shadow transition-colors print:hidden"
+              >
+                <ExternalLink className="w-3 h-3" />
+                <span>{language === 'ar' ? 'عرض / فتح التقرير' : 'Open PDF Report'}</span>
+              </a>
+            )}
+          </div>
+        ) : ph.dataUrl ? (
+          <img
+            src={ph.dataUrl}
+            alt={`${ph.category} (${ph.stage})`}
+            className="w-full h-full object-contain"
+          />
+        ) : (
+          <div className="text-slate-500 text-xs italic text-center p-3">
+            {language === 'ar' ? 'ملف الصورة الرقمية غير مرفق' : 'No digital image file attached'}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -530,13 +594,10 @@ export const ReportEngineView: React.FC<ReportEngineViewProps> = ({
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {orthoCase.photos.map((ph) => (
                   <div key={ph.id} className="bg-slate-800/70 border border-slate-700 rounded p-3 space-y-2">
-                    <ClinicalRecordIllustration
-                      svgType={ph.svgType}
-                      stage={ph.stage}
-                      category={ph.category}
-                    />
-                    <div className="text-xs text-cyan-400">
-                      {formatTimepointStage(language, ph.stage)} · {formatPhotoCategory(language, ph.category)}
+                    {renderMediaPreview(ph, 'aspect-[4/3]')}
+                    <div className="text-xs text-cyan-400 font-semibold flex justify-between items-center">
+                      <span>{formatPhotoCategory(language, ph.category)}</span>
+                      <span className="font-mono text-[10px] text-slate-300">{formatTimepointStage(language, ph.stage)}</span>
                     </div>
                     <p className="text-xs text-slate-300">
                       {language === 'ar' ? ph.captionAr : ph.captionEn}
@@ -673,6 +734,43 @@ export const ReportEngineView: React.FC<ReportEngineViewProps> = ({
                 </div>
               </div>
             </div>
+
+            {/* Section 01 Photographic Baseline Panel */}
+            {extraoralPhotos.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-slate-100">
+                <div className="text-[11px] font-semibold text-slate-700 mb-2">
+                  {language === 'ar'
+                    ? 'الصور التعريفية السريرية للمريض:'
+                    : 'Patient Clinical Identification Photographs:'}
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {extraoralPhotos.slice(0, 4).map((ph) => (
+                    <div key={ph.id} className="border border-slate-200 rounded-lg overflow-hidden bg-slate-900 flex flex-col">
+                      <div className="px-2 py-0.5 bg-slate-800 text-slate-200 font-mono text-[9px] font-semibold flex justify-between items-center">
+                        <span className="truncate">{formatPhotoCategory(language, ph.category)}</span>
+                        <span className="text-cyan-400 shrink-0 ml-1">{formatTimepointStage(language, ph.stage)}</span>
+                      </div>
+                      <div className="aspect-[3/4] flex items-center justify-center overflow-hidden bg-slate-950">
+                        {ph.dataUrl ? (
+                          <img
+                            src={ph.dataUrl}
+                            alt={`${ph.category} (${ph.stage})`}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="text-slate-500 text-[10px] italic text-center p-2">
+                            {language === 'ar' ? 'الصورة غير مرفقة' : 'No photo attached'}
+                          </div>
+                        )}
+                      </div>
+                      <div className="p-1 bg-white border-t border-slate-100 text-[9px] text-slate-500 truncate">
+                        {ph.date} · {language === 'ar' ? ph.captionAr : ph.captionEn}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
         )}
 
@@ -823,6 +921,95 @@ export const ReportEngineView: React.FC<ReportEngineViewProps> = ({
                 </div>
               </div>
             </div>
+
+            {/* Clinical Photographic Panels for Section 03 */}
+            <div className="mt-4 pt-4 border-t border-slate-200 space-y-4">
+              {/* Extraoral Facial Photographs */}
+              <div>
+                <h4 className="text-xs font-bold text-slate-800 mb-2">
+                  {language === 'ar'
+                    ? 'الصور السريرية خارج الفموية (Extraoral Facial Photos)'
+                    : 'Extraoral Facial Photographs'}
+                </h4>
+                {extraoralPhotos.length > 0 ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {extraoralPhotos.map((ph) => (
+                      <div key={ph.id} className="border border-slate-200 rounded-lg overflow-hidden bg-slate-900 flex flex-col">
+                        <div className="px-2 py-1 bg-slate-800 text-slate-200 font-mono text-[10px] font-semibold flex justify-between items-center">
+                          <span className="truncate">{formatPhotoCategory(language, ph.category)}</span>
+                          <span className="text-cyan-400 shrink-0 ml-1">{formatTimepointStage(language, ph.stage)}</span>
+                        </div>
+                        <div className="aspect-[3/4] flex items-center justify-center overflow-hidden bg-slate-950">
+                          {ph.dataUrl ? (
+                            <img
+                              src={ph.dataUrl}
+                              alt={`${ph.category} (${ph.stage})`}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="text-slate-500 text-[10px] italic text-center p-2">
+                              {language === 'ar' ? 'الصورة غير مرفقة' : 'No photo attached'}
+                            </div>
+                          )}
+                        </div>
+                        <div className="p-1.5 bg-white border-t border-slate-100 text-[10px] text-slate-500 truncate">
+                          {ph.date} · {language === 'ar' ? ph.captionAr : ph.captionEn}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-3 bg-slate-50 border border-dashed border-slate-200 rounded text-xs text-slate-500 italic">
+                    {language === 'ar'
+                      ? 'لا توجد صور وجهية خارج فموية مرفقة لهذه الحالة.'
+                      : 'No extraoral facial photographs attached to this case.'}
+                  </div>
+                )}
+              </div>
+
+              {/* Intraoral Dental & Arch Photographs */}
+              <div>
+                <h4 className="text-xs font-bold text-slate-800 mb-2">
+                  {language === 'ar'
+                    ? 'الصور السريرية داخل الفموية والإطباقية (Intraoral Occlusal Photos)'
+                    : 'Intraoral Occlusal & Arch Photographs'}
+                </h4>
+                {intraoralPhotos.length > 0 ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                    {intraoralPhotos.map((ph) => (
+                      <div key={ph.id} className="border border-slate-200 rounded-lg overflow-hidden bg-slate-900 flex flex-col">
+                        <div className="px-2 py-1 bg-slate-800 text-slate-200 font-mono text-[10px] font-semibold flex justify-between items-center">
+                          <span className="truncate">{formatPhotoCategory(language, ph.category)}</span>
+                          <span className="text-cyan-400 shrink-0 ml-1">{formatTimepointStage(language, ph.stage)}</span>
+                        </div>
+                        <div className="aspect-[4/3] flex items-center justify-center overflow-hidden bg-slate-950">
+                          {ph.dataUrl ? (
+                            <img
+                              src={ph.dataUrl}
+                              alt={`${ph.category} (${ph.stage})`}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="text-slate-500 text-[10px] italic text-center p-2">
+                              {language === 'ar' ? 'الصورة غير مرفقة' : 'No photo attached'}
+                            </div>
+                          )}
+                        </div>
+                        <div className="p-1.5 bg-white border-t border-slate-100 text-[10px] text-slate-500 truncate">
+                          {ph.date} · {language === 'ar' ? ph.captionAr : ph.captionEn}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-3 bg-slate-50 border border-dashed border-slate-200 rounded text-xs text-slate-500 italic">
+                    {language === 'ar'
+                      ? 'لا توجد صور إطباقية داخل فموية مرفقة لهذه الحالة.'
+                      : 'No intraoral dental photographs attached to this case.'}
+                  </div>
+                )}
+              </div>
+            </div>
           </section>
         )}
 
@@ -869,6 +1056,37 @@ export const ReportEngineView: React.FC<ReportEngineViewProps> = ({
                   {orthoCase.cbctAndRadiographs.tadSafeZonesNotes}
                 </div>
               </div>
+            </div>
+
+            {/* Attached Radiographic & CBCT Scans Panel */}
+            <div className="mt-3 pt-3 border-t border-slate-100">
+              <div className="text-xs font-semibold text-slate-800 mb-2">
+                {language === 'ar'
+                  ? 'السجلات الشعاعية والمقطعية المرفقة:'
+                  : 'Attached Radiographic & CBCT Scans:'}
+              </div>
+              {radiographicPhotos.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {radiographicPhotos.map((ph) => (
+                    <div key={ph.id} className="border border-slate-200 rounded-lg overflow-hidden bg-slate-950 flex flex-col">
+                      <div className="px-2.5 py-1 bg-slate-900 text-slate-300 font-mono text-[10px] font-semibold flex justify-between items-center border-b border-slate-800">
+                        <span className="truncate">{formatPhotoCategory(language, ph.category)}</span>
+                        <span className="text-cyan-400 shrink-0 ml-1">{formatTimepointStage(language, ph.stage)}</span>
+                      </div>
+                      {renderMediaPreview(ph, 'aspect-[4/3]')}
+                      <div className="p-2 bg-slate-900 border-t border-slate-800 text-[10px] text-slate-400 truncate">
+                        {ph.date} · {language === 'ar' ? ph.captionAr : ph.captionEn}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-3 bg-slate-50 border border-dashed border-slate-200 rounded text-xs text-slate-500 italic">
+                  {language === 'ar'
+                    ? 'لا توجد صور شعاعية أو مقطعية مرفقة بهذه الحالة حتى الآن.'
+                    : 'No radiographic or CBCT scan images attached to this case.'}
+                </div>
+              )}
             </div>
           </section>
         )}
@@ -1198,17 +1416,18 @@ export const ReportEngineView: React.FC<ReportEngineViewProps> = ({
                 </div>
               ) : (
                 orthoCase.photos.map((ph) => (
-                <div key={ph.id} className="border border-slate-200 rounded p-3 space-y-2 text-xs">
-                  <ClinicalRecordIllustration
-                    svgType={ph.svgType}
-                    stage={ph.stage}
-                    category={ph.category}
-                  />
-                  <div className="font-semibold text-slate-800">
-                    {formatTimepointStage(language, ph.stage)} ({ph.date}) ·{' '}
-                    {formatPhotoCategory(language, ph.category)}
+                <div key={ph.id} className="border border-slate-200 rounded-lg overflow-hidden bg-white p-3 space-y-2 text-xs shadow-xs flex flex-col">
+                  {renderMediaPreview(ph, 'aspect-[4/3]')}
+                  <div className="font-semibold text-slate-800 flex justify-between items-center pt-1 border-t border-slate-100">
+                    <span>{formatPhotoCategory(language, ph.category)}</span>
+                    <span className="font-mono text-[10px] text-blue-600 font-bold bg-blue-50 px-1.5 py-0.5 rounded">
+                      {formatTimepointStage(language, ph.stage)}
+                    </span>
                   </div>
-                  <p className="text-slate-600 leading-relaxed">
+                  <div className="text-[11px] text-slate-500 font-mono">
+                    {ph.date}
+                  </div>
+                  <p className="text-slate-600 leading-relaxed text-[11px]">
                     {language === 'ar' ? ph.captionAr : ph.captionEn}
                   </p>
                 </div>

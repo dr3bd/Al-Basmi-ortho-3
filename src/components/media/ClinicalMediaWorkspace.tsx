@@ -19,6 +19,9 @@ import {
   Grid,
   Columns,
   RotateCw,
+  ExternalLink,
+  ShieldCheck,
+  SplitSquareVertical,
 } from 'lucide-react';
 import {
   ClinicalPhotoRecord,
@@ -29,6 +32,7 @@ import {
 } from '../../types/orthodontics';
 import { formatPhotoCategory, formatTimepointStage } from '../../utils/i18n';
 import { ClinicalRecordIllustration } from '../CephTracingCanvas';
+import { WebCephImportModal, WebCephImportResult } from './WebCephImportModal';
 
 export interface ClinicalMediaWorkspaceProps {
   orthoCase: OrthodonticCase;
@@ -212,6 +216,30 @@ const STANDARD_SLOTS: StandardSlotDef[] = [
     iconType: 'xray',
     svgFallbackType: 'periapical_xray',
   },
+  {
+    key: 'lateral_ceph_tracing',
+    category: 'Lateral Ceph Tracing',
+    titleAr: 'تخطيط سيفالومتري WebCeph',
+    titleEn: 'WebCeph Tracing Overlay',
+    subtitleAr: 'تخطيط المعالم ومرتسم الأنسجة الرخوة المستورد من WebCeph',
+    subtitleEn: 'Imported WebCeph tracing landmarks and soft-tissue profile',
+    group: 'radiographic',
+    aspectRatio: 'aspect-[4/5]',
+    iconType: 'xray',
+    svgFallbackType: 'ceph_radiograph',
+  },
+  {
+    key: 'webceph_report_pdf',
+    category: 'WebCeph Report (PDF)',
+    titleAr: 'تقرير WebCeph بصيغة PDF',
+    titleEn: 'WebCeph Analysis PDF Document',
+    subtitleAr: 'ملف تقرير القياسات والتحليل السيفالومتري الشامل من WebCeph',
+    subtitleEn: 'Comprehensive WebCeph cephalometric PDF report attachment',
+    group: 'radiographic',
+    aspectRatio: 'aspect-[4/3]',
+    iconType: 'xray',
+    svgFallbackType: 'periapical_xray',
+  },
 ];
 
 export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
@@ -226,7 +254,21 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
   const [lightboxPhoto, setLightboxPhoto] = React.useState<ClinicalPhotoRecord | null>(null);
   const [editingPhoto, setEditingPhoto] = React.useState<ClinicalPhotoRecord | null>(null);
   const [showAddCustomModal, setShowAddCustomModal] = React.useState<boolean>(false);
+  const [showWebCephImportModal, setShowWebCephImportModal] = React.useState<boolean>(false);
   const [dragOverSlotKey, setDragOverSlotKey] = React.useState<string | null>(null);
+
+  // Flexible Comparison State (Work A)
+  const [compareMode, setCompareMode] = React.useState<'dual' | 'triple'>('dual');
+  const [compareStage1, setCompareStage1] = React.useState<TimepointStage>('T0_Initial');
+  const [compareStage2, setCompareStage2] = React.useState<TimepointStage>('T3_Final');
+  const [compareCategoryFilter, setCompareCategoryFilter] = React.useState<string>('all');
+  const [dualInspectPair, setDualInspectPair] = React.useState<{
+    title: string;
+    photo1?: ClinicalPhotoRecord;
+    photo2?: ClinicalPhotoRecord;
+    stage1: TimepointStage;
+    stage2: TimepointStage;
+  } | null>(null);
 
   // Form state for custom photo modal
   const [customCategory, setCustomCategory] = React.useState<string>('Extraoral Smile');
@@ -261,6 +303,15 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
       const rawDataUrl = e.target?.result as string;
       if (!rawDataUrl) return;
 
+      if (
+        file.type === 'application/pdf' ||
+        file.name.toLowerCase().endsWith('.pdf') ||
+        rawDataUrl.startsWith('data:application/pdf')
+      ) {
+        commitNewPhoto(rawDataUrl, file.name, file.size, targetCategory, targetStage, slotDef);
+        return;
+      }
+
       // Create an image to measure dimensions & optionally downscale if massive
       const img = new Image();
       img.onload = () => {
@@ -288,6 +339,9 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
           commitNewPhoto(rawDataUrl, file.name, file.size, targetCategory, targetStage, slotDef);
         }
       };
+      img.onerror = () => {
+        commitNewPhoto(rawDataUrl, file.name, file.size, targetCategory, targetStage, slotDef);
+      };
       img.src = rawDataUrl;
     };
     reader.readAsDataURL(file);
@@ -305,6 +359,8 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
       (p) => p.category.toLowerCase().trim() === category.toLowerCase().trim() && p.stage === stage
     );
 
+    const isPdf = dataUrl.startsWith('data:application/pdf') || fileName.toLowerCase().endsWith('.pdf');
+
     const newPhoto: ClinicalPhotoRecord = {
       id: `ph_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       stage,
@@ -312,7 +368,7 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
       category,
       captionEn: slotDef?.subtitleEn || `${category} - ${stage}`,
       captionAr: slotDef?.subtitleAr || `${formatPhotoCategory('ar', category)} - ${formatTimepointStage('ar', stage)}`,
-      svgType: slotDef?.svgFallbackType || 'photo_custom',
+      svgType: isPdf ? 'pdf_document' : (slotDef?.svgFallbackType || 'photo_custom'),
       dataUrl,
     };
 
@@ -332,6 +388,115 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
       },
       'Attached Clinical Photo / Radiograph',
       `${category} (${stage}) - ${fileName}`
+    );
+  };
+
+  const handleCommitWebCephImport = (result: WebCephImportResult) => {
+    let updatedPhotos = [...photos];
+    const now = Date.now();
+
+    // 1. Raw Radiograph
+    if (result.rawRadiograph) {
+      const existingRawIdx = updatedPhotos.findIndex(
+        (p) => p.category.toLowerCase().trim() === 'lateral ceph' && p.stage === result.stage
+      );
+      const rawRecord: ClinicalPhotoRecord = {
+        id: `ph_ceph_raw_${now}`,
+        stage: result.stage,
+        date: result.acquisitionDate,
+        category: 'Lateral Ceph',
+        captionEn: `Lateral Cephalometric Radiograph (WebCeph import: ${result.rawRadiograph.fileName}) - Approved by ${result.doctorReviewer}`,
+        captionAr: `صورة الأشعة السيفالومترية الخام (استيراد WebCeph: ${result.rawRadiograph.fileName}) - معتمدة بواسطة ${result.doctorReviewer}`,
+        svgType: 'ceph_radiograph',
+        dataUrl: result.rawRadiograph.dataUrl,
+      };
+      if (existingRawIdx >= 0) {
+        updatedPhotos[existingRawIdx] = rawRecord;
+      } else {
+        updatedPhotos.push(rawRecord);
+      }
+    }
+
+    // 2. Tracing Overlay Image
+    if (result.tracingImage) {
+      const existingTraceIdx = updatedPhotos.findIndex(
+        (p) => p.category.toLowerCase().trim() === 'lateral ceph tracing' && p.stage === result.stage
+      );
+      const traceRecord: ClinicalPhotoRecord = {
+        id: `ph_ceph_trace_${now}`,
+        stage: result.stage,
+        date: result.acquisitionDate,
+        category: 'Lateral Ceph Tracing',
+        captionEn: `WebCeph Tracing & Soft-Tissue Analysis (${result.tracingImage.fileName}) - Approved by ${result.doctorReviewer}`,
+        captionAr: `تخطيط وتحليل سيفالومتري WebCeph (${result.tracingImage.fileName}) - معتمد بواسطة ${result.doctorReviewer}`,
+        svgType: 'ceph_tracing_overlay',
+        dataUrl: result.tracingImage.dataUrl,
+      };
+      if (existingTraceIdx >= 0) {
+        updatedPhotos[existingTraceIdx] = traceRecord;
+      } else {
+        updatedPhotos.push(traceRecord);
+      }
+    }
+
+    // 3. PDF Analysis Report
+    if (result.pdfReport) {
+      const existingPdfIdx = updatedPhotos.findIndex(
+        (p) => p.category.toLowerCase().trim() === 'webceph report (pdf)' && p.stage === result.stage
+      );
+      const pdfRecord: ClinicalPhotoRecord = {
+        id: `ph_ceph_pdf_${now}`,
+        stage: result.stage,
+        date: result.acquisitionDate,
+        category: 'WebCeph Report (PDF)',
+        captionEn: `WebCeph Orthodontic Analysis PDF Report (${result.pdfReport.fileName}) - Approved by ${result.doctorReviewer}`,
+        captionAr: `تقرير التحليل السيفالومتري بصيغة PDF من WebCeph (${result.pdfReport.fileName}) - معتمد بواسطة ${result.doctorReviewer}`,
+        svgType: 'pdf_document',
+        dataUrl: result.pdfReport.dataUrl,
+      };
+      if (existingPdfIdx >= 0) {
+        updatedPhotos[existingPdfIdx] = pdfRecord;
+      } else {
+        updatedPhotos.push(pdfRecord);
+      }
+    }
+
+    // 4. Update Ceph Records
+    let updatedCephRecords = [...(orthoCase.cephRecords || [])];
+    if (result.measurements) {
+      const recIdx = updatedCephRecords.findIndex((r) => r.stage === result.stage);
+      if (recIdx >= 0) {
+        updatedCephRecords[recIdx] = {
+          ...updatedCephRecords[recIdx],
+          doctorVerified: true,
+          values: {
+            ...updatedCephRecords[recIdx].values,
+            ...result.measurements,
+          },
+          superimpositionNotesEn: result.notesEn || updatedCephRecords[recIdx].superimpositionNotesEn,
+          superimpositionNotesAr: result.notesAr || updatedCephRecords[recIdx].superimpositionNotesAr,
+        };
+      } else {
+        updatedCephRecords.push({
+          stage: result.stage,
+          date: result.acquisitionDate,
+          doctorVerified: true,
+          landmarks: [],
+          values: result.measurements,
+          superimpositionNotesEn: result.notesEn || '',
+          superimpositionNotesAr: result.notesAr || '',
+        });
+      }
+    }
+
+    onUpdateCase(
+      {
+        ...orthoCase,
+        photos: updatedPhotos,
+        cephRecords: updatedCephRecords,
+      },
+      'WEBCEPH_MULTI_ASSET_IMPORT_APPROVED',
+      `WebCeph digital assets and measurements approved by ${result.doctorReviewer} for stage ${result.stage}`
     );
   };
 
@@ -762,6 +927,15 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              onClick={() => setShowWebCephImportModal(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors min-h-[40px]"
+            >
+              <Sparkles className="w-4 h-4 text-cyan-300" />
+              <span>{isAr ? 'استيراد WebCeph' : 'Import WebCeph'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={handleLoadSampleSeries}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors min-h-[40px]"
             >
@@ -906,77 +1080,174 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
         </div>
       )}
 
-      {/* 4. VIEW MODE: BEFORE VS AFTER COMPARISON (T0 vs T3) */}
+      {/* 4. VIEW MODE: FLEXIBLE SIDE-BY-SIDE COMPARISON (Work A) */}
       {viewMode === 'comparison' && (
         <div className="space-y-6">
-          <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl flex items-center justify-between text-xs text-blue-900">
-            <div>
-              <span className="font-bold">
-                {isAr ? 'مقارنة مزدوجة متقابلة: قبل العلاج (T0) مقابل النتيجة النهائية (T3)' : 'Dual Comparison: Initial Baseline (T0) vs Final Result (T3)'}
-              </span>
-              <p className="text-[11px] text-blue-700 mt-0.5">
-                {isAr
-                  ? 'عرض مقارن مباشر للقطات الوجه والأسنان والأشعة لتتبع التغيرات السريرية والتحسن الجمالي.'
-                  : 'Direct side-by-side view for soft tissue profile, smile arc, and dental alignment evaluation.'}
-              </p>
+          <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <span className="font-bold text-xs text-blue-900">
+                  {isAr ? 'المقارنة المباشرة المرنة للسجلات والاقترانات السريرية' : 'Flexible Multi-Stage Clinical Record Comparison Matrix'}
+                </span>
+                <p className="text-[11px] text-blue-700 mt-0.5">
+                  {isAr
+                    ? 'قارن بين أي مرحلتين (T0, T1, T3) أو اعرض التطور عبر المراحل الثلاث جنباً إلى جنب مع معالجة ملفات الـ PDF والمعاينة المكبرة.'
+                    : 'Compare any two stages (T0, T1, T3) or view 3-stage longitudinal progress side-by-side.'}
+                </p>
+              </div>
+
+              {/* Layout Mode Switcher */}
+              <div className="inline-flex rounded-lg border border-blue-300 bg-white p-0.5 text-xs font-semibold text-blue-900">
+                <button
+                  type="button"
+                  onClick={() => setCompareMode('dual')}
+                  className={`px-3 py-1 rounded transition-all ${
+                    compareMode === 'dual' ? 'bg-blue-600 text-white shadow-2xs' : 'hover:bg-blue-50'
+                  }`}
+                >
+                  {isAr ? 'مقارنة ثنائية (2 Stages)' : 'Dual Compare (2 Stages)'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCompareMode('triple')}
+                  className={`px-3 py-1 rounded transition-all ${
+                    compareMode === 'triple' ? 'bg-blue-600 text-white shadow-2xs' : 'hover:bg-blue-50'
+                  }`}
+                >
+                  {isAr ? 'تطور زمني ثلاثي (T0/T1/T3)' : 'Triple Longitudinal (T0/T1/T3)'}
+                </button>
+              </div>
+            </div>
+
+            {/* Filter Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-blue-200/60 text-xs">
+              {compareMode === 'dual' && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-slate-700">{isAr ? 'المرحلة الأولى:' : 'Stage 1:'}</span>
+                  <select
+                    value={compareStage1}
+                    onChange={(e) => setCompareStage1(e.target.value as TimepointStage)}
+                    className="px-2.5 py-1 border border-slate-300 rounded bg-white text-slate-900 font-semibold"
+                  >
+                    <option value="T0_Initial">{formatTimepointStage(language, 'T0_Initial')}</option>
+                    <option value="T1_Progress">{formatTimepointStage(language, 'T1_Progress')}</option>
+                    <option value="T3_Final">{formatTimepointStage(language, 'T3_Final')}</option>
+                    <option value="T4_Retention">{formatTimepointStage(language, 'T4_Retention')}</option>
+                  </select>
+
+                  <span className="font-semibold text-slate-700 ml-2">{isAr ? 'المرحلة الثانية:' : 'Stage 2:'}</span>
+                  <select
+                    value={compareStage2}
+                    onChange={(e) => setCompareStage2(e.target.value as TimepointStage)}
+                    className="px-2.5 py-1 border border-slate-300 rounded bg-white text-slate-900 font-semibold"
+                  >
+                    <option value="T0_Initial">{formatTimepointStage(language, 'T0_Initial')}</option>
+                    <option value="T1_Progress">{formatTimepointStage(language, 'T1_Progress')}</option>
+                    <option value="T3_Final">{formatTimepointStage(language, 'T3_Final')}</option>
+                    <option value="T4_Retention">{formatTimepointStage(language, 'T4_Retention')}</option>
+                  </select>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-slate-700">{isAr ? 'التصنيف:' : 'Category:'}</span>
+                <select
+                  value={compareCategoryFilter}
+                  onChange={(e) => setCompareCategoryFilter(e.target.value)}
+                  className="px-2.5 py-1 border border-slate-300 rounded bg-white text-slate-900 font-semibold"
+                >
+                  <option value="all">{isAr ? 'جميع المربعات المعتمدة (All Slots)' : 'All Clinical Slots'}</option>
+                  <option value="extraoral">{isAr ? 'خارج الفم والوجه (Extraoral)' : 'Extraoral Views'}</option>
+                  <option value="intraoral">{isAr ? 'داخل الفم والإطباق (Intraoral)' : 'Intraoral Views'}</option>
+                  <option value="radiographic">{isAr ? 'الأشعة والتحليل (Radiographic)' : 'Radiographic & Tracings'}</option>
+                </select>
+              </div>
             </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {[
-              { cat: 'Extraoral Smile', titleAr: 'الابتسامة الوجهية', titleEn: 'Frontal Smile Arc' },
-              { cat: 'Extraoral Profile', titleAr: 'المرتسم الجانبي (البروفايل)', titleEn: 'Profile Convexity' },
-              { cat: 'Intraoral Frontal', titleAr: 'الإطباق السني الأمامي', titleEn: 'Frontal Incisor Occlusion' },
-              { cat: 'Lateral Ceph', titleAr: 'الأشعة السيفالومترية', titleEn: 'Lateral Cephalogram' },
-            ].map((compItem) => {
-              const t0 = photos.find((p) => p.category === compItem.cat && p.stage === 'T0_Initial');
-              const t3 = photos.find((p) => p.category === compItem.cat && p.stage === 'T3_Final');
+            {STANDARD_SLOTS.filter((s) => {
+              if (compareCategoryFilter === 'extraoral') return s.group === 'extraoral';
+              if (compareCategoryFilter === 'intraoral') return s.group === 'intraoral';
+              if (compareCategoryFilter === 'radiographic') return s.group === 'radiographic';
+              return true;
+            }).map((slot) => {
+              const p1 = findPhotoForSlot(slot, compareStage1);
+              const p2 = findPhotoForSlot(slot, compareStage2);
+              const p0 = findPhotoForSlot(slot, 'T0_Initial');
+              const pt1 = findPhotoForSlot(slot, 'T1_Progress');
+              const pt3 = findPhotoForSlot(slot, 'T3_Final');
 
-              return (
-                <div key={compItem.cat} className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-3">
-                  <h4 className="text-xs font-bold text-slate-900 border-b border-slate-100 pb-2">
-                    {isAr ? compItem.titleAr : compItem.titleEn}
-                  </h4>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    {/* T0 Card */}
-                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-900 flex flex-col">
-                      <div className="px-2.5 py-1 bg-amber-500/20 text-amber-300 font-mono text-[10px] font-bold flex justify-between">
-                        <span>{isAr ? 'قبل العلاج (T0)' : 'Initial (T0)'}</span>
-                        <span>{t0?.date || '—'}</span>
-                      </div>
-                      <div className="aspect-[4/3] flex items-center justify-center overflow-hidden">
-                        {t0 ? (
-                          t0.dataUrl ? (
-                            <img src={t0.dataUrl} alt="T0" className="w-full h-full object-cover" />
-                          ) : (
-                            <ClinicalRecordIllustration svgType={t0.svgType} stage={t0.stage} category={t0.category} />
-                          )
-                        ) : (
-                          <span className="text-[11px] text-slate-500 italic">{isAr ? 'لا توجد صورة T0' : 'No T0 record'}</span>
-                        )}
-                      </div>
+              const renderFrameContent = (ph?: ClinicalPhotoRecord, label?: string, stg?: TimepointStage) => {
+                const isPdf = ph?.dataUrl?.startsWith('data:application/pdf') || ph?.category.includes('PDF');
+                return (
+                  <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-900 flex flex-col h-full">
+                    <div className="px-2.5 py-1 bg-slate-800 text-slate-200 font-mono text-[10px] font-bold flex justify-between items-center border-b border-slate-700">
+                      <span>{label || formatTimepointStage(language, stg || 'T0_Initial')}</span>
+                      <span>{ph?.date || '—'}</span>
                     </div>
-
-                    {/* T3 Card */}
-                    <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-900 flex flex-col">
-                      <div className="px-2.5 py-1 bg-emerald-500/20 text-emerald-300 font-mono text-[10px] font-bold flex justify-between">
-                        <span>{isAr ? 'النتيجة (T3)' : 'Final (T3)'}</span>
-                        <span>{t3?.date || '—'}</span>
-                      </div>
-                      <div className="aspect-[4/3] flex items-center justify-center overflow-hidden">
-                        {t3 ? (
-                          t3.dataUrl ? (
-                            <img src={t3.dataUrl} alt="T3" className="w-full h-full object-cover" />
-                          ) : (
-                            <ClinicalRecordIllustration svgType={t3.svgType} stage={t3.stage} category={t3.category} />
-                          )
+                    <div
+                      className="aspect-[4/3] flex items-center justify-center overflow-hidden bg-black relative cursor-pointer group"
+                      onClick={() => ph && setLightboxPhoto(ph)}
+                    >
+                      {ph ? (
+                        isPdf ? (
+                          <div className="p-3 text-center flex flex-col items-center justify-center">
+                            <FileText className="w-8 h-8 text-rose-400 mb-1" />
+                            <span className="text-[10px] font-bold text-rose-300 uppercase font-mono">PDF REPORT</span>
+                            <span className="text-[9px] text-slate-300 mt-1 line-clamp-1">{ph.captionEn}</span>
+                          </div>
+                        ) : ph.dataUrl ? (
+                          <img src={ph.dataUrl} alt={ph.category} className="w-full h-full object-cover transition-transform group-hover:scale-105" />
                         ) : (
-                          <span className="text-[11px] text-slate-500 italic">{isAr ? 'لا توجد صورة T3' : 'No T3 record'}</span>
-                        )}
-                      </div>
+                          <ClinicalRecordIllustration svgType={ph.svgType} stage={ph.stage} category={ph.category} />
+                        )
+                      ) : (
+                        <span className="text-[11px] text-slate-500 italic">{isAr ? 'لا يوجد سجل' : 'No record'}</span>
+                      )}
                     </div>
                   </div>
+                );
+              };
+
+              return (
+                <div key={slot.key} className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-3">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                    <h4 className="text-xs font-bold text-slate-900">
+                      {isAr ? slot.titleAr : slot.titleEn}
+                    </h4>
+                    {compareMode === 'dual' && (p1 || p2) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDualInspectPair({
+                            title: isAr ? slot.titleAr : slot.titleEn,
+                            photo1: p1,
+                            photo2: p2,
+                            stage1: compareStage1,
+                            stage2: compareStage2,
+                          })
+                        }
+                        className="text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 hover:bg-blue-100 flex items-center gap-1"
+                      >
+                        <Columns className="w-3 h-3" />
+                        <span>{isAr ? 'معاينة متقابلة مكبرة' : 'Dual Zoom'}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {compareMode === 'dual' ? (
+                    <div className="grid grid-cols-2 gap-3">
+                      {renderFrameContent(p1, formatTimepointStage(language, compareStage1), compareStage1)}
+                      {renderFrameContent(p2, formatTimepointStage(language, compareStage2), compareStage2)}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2">
+                      {renderFrameContent(p0, 'T0 Initial', 'T0_Initial')}
+                      {renderFrameContent(pt1, 'T1 Progress', 'T1_Progress')}
+                      {renderFrameContent(pt3, 'T3 Final', 'T3_Final')}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -1021,9 +1292,32 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Modal Image Body */}
+            {/* Modal Image / Document Body */}
             <div className="relative max-h-[70vh] flex items-center justify-center p-4 bg-black/50 overflow-hidden">
-              {lightboxPhoto.dataUrl ? (
+              {lightboxPhoto.dataUrl?.startsWith('data:application/pdf') || lightboxPhoto.category.includes('PDF') ? (
+                <div className="w-full h-[60vh] flex flex-col items-center justify-center text-center p-6 bg-slate-900 border border-slate-800 rounded-xl space-y-3">
+                  <div className="w-16 h-16 rounded-2xl bg-rose-500/20 text-rose-400 border border-rose-500/30 flex items-center justify-center shadow-lg">
+                    <FileText className="w-8 h-8" />
+                  </div>
+                  <h4 className="text-sm font-bold text-white max-w-lg">
+                    {isAr ? lightboxPhoto.captionAr : lightboxPhoto.captionEn}
+                  </h4>
+                  <p className="text-xs text-slate-400 font-mono">
+                    {lightboxPhoto.category} · {formatTimepointStage(language, lightboxPhoto.stage)}
+                  </p>
+                  {lightboxPhoto.dataUrl && (
+                    <a
+                      href={lightboxPhoto.dataUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-2 shadow"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      <span>{isAr ? 'فتح ملف PDF في نافذة جديدة' : 'Open PDF Document in New Tab'}</span>
+                    </a>
+                  )}
+                </div>
+              ) : lightboxPhoto.dataUrl ? (
                 <img
                   src={lightboxPhoto.dataUrl}
                   alt={lightboxPhoto.category}
@@ -1334,6 +1628,106 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* 7. DUAL INSPECT FULLSCREEN MODAL */}
+      {dualInspectPair && (
+        <div
+          className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4 backdrop-blur-sm"
+          onClick={() => setDualInspectPair(null)}
+        >
+          <div
+            className="relative max-w-6xl w-full bg-slate-900 border border-slate-700 rounded-2xl overflow-hidden flex flex-col shadow-2xl max-h-[90vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between text-white bg-slate-950">
+              <div>
+                <h3 className="text-sm font-bold flex items-center gap-2">
+                  <Columns className="w-4 h-4 text-cyan-400" />
+                  <span>{dualInspectPair.title}</span>
+                  <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950 px-2 py-0.5 rounded border border-cyan-800">
+                    Dual Inspection
+                  </span>
+                </h3>
+                <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                  {formatTimepointStage(language, dualInspectPair.stage1)} vs {formatTimepointStage(language, dualInspectPair.stage2)} · Case: {orthoCase.id}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDualInspectPair(null)}
+                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Split Inspection Body */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 overflow-y-auto max-h-[75vh]">
+              {/* Photo 1 */}
+              <div className="border border-slate-800 rounded-xl overflow-hidden bg-black flex flex-col">
+                <div className="px-3 py-1.5 bg-amber-950/80 text-amber-300 font-mono text-xs font-bold border-b border-slate-800 flex justify-between">
+                  <span>{formatTimepointStage(language, dualInspectPair.stage1)}</span>
+                  <span>{dualInspectPair.photo1?.date || '—'}</span>
+                </div>
+                <div className="aspect-[4/3] flex items-center justify-center p-2 bg-slate-950">
+                  {dualInspectPair.photo1 ? (
+                    dualInspectPair.photo1.dataUrl ? (
+                      <img src={dualInspectPair.photo1.dataUrl} alt="Stage 1" className="max-h-full max-w-full object-contain rounded" />
+                    ) : (
+                      <ClinicalRecordIllustration svgType={dualInspectPair.photo1.svgType} stage={dualInspectPair.photo1.stage} category={dualInspectPair.photo1.category} />
+                    )
+                  ) : (
+                    <span className="text-xs text-slate-500 italic">{isAr ? 'لا يوجد سجل للمرحلة الأولى' : 'No record for Stage 1'}</span>
+                  )}
+                </div>
+                {dualInspectPair.photo1 && (
+                  <p className="p-3 text-xs text-slate-300 border-t border-slate-900 bg-slate-950">
+                    {isAr ? dualInspectPair.photo1.captionAr : dualInspectPair.photo1.captionEn}
+                  </p>
+                )}
+              </div>
+
+              {/* Photo 2 */}
+              <div className="border border-slate-800 rounded-xl overflow-hidden bg-black flex flex-col">
+                <div className="px-3 py-1.5 bg-emerald-950/80 text-emerald-300 font-mono text-xs font-bold border-b border-slate-800 flex justify-between">
+                  <span>{formatTimepointStage(language, dualInspectPair.stage2)}</span>
+                  <span>{dualInspectPair.photo2?.date || '—'}</span>
+                </div>
+                <div className="aspect-[4/3] flex items-center justify-center p-2 bg-slate-950">
+                  {dualInspectPair.photo2 ? (
+                    dualInspectPair.photo2.dataUrl ? (
+                      <img src={dualInspectPair.photo2.dataUrl} alt="Stage 2" className="max-h-full max-w-full object-contain rounded" />
+                    ) : (
+                      <ClinicalRecordIllustration svgType={dualInspectPair.photo2.svgType} stage={dualInspectPair.photo2.stage} category={dualInspectPair.photo2.category} />
+                    )
+                  ) : (
+                    <span className="text-xs text-slate-500 italic">{isAr ? 'لا يوجد سجل للمرحلة الثانية' : 'No record for Stage 2'}</span>
+                  )}
+                </div>
+                {dualInspectPair.photo2 && (
+                  <p className="p-3 text-xs text-slate-300 border-t border-slate-900 bg-slate-950">
+                    {isAr ? dualInspectPair.photo2.captionAr : dualInspectPair.photo2.captionEn}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 8. WEBCEPH MULTI-ASSET IMPORT MODAL */}
+      {showWebCephImportModal && (
+        <WebCephImportModal
+          isOpen={showWebCephImportModal}
+          onClose={() => setShowWebCephImportModal(false)}
+          orthoCase={orthoCase}
+          patient={patient}
+          language={language}
+          initialStage={activeStageFilter === 'ALL' ? 'T0_Initial' : activeStageFilter}
+          onCommitImport={handleCommitWebCephImport}
+        />
       )}
     </div>
   );

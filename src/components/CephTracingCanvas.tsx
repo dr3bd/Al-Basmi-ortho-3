@@ -7,6 +7,9 @@ interface CephTracingCanvasProps {
   showSuperimposition: boolean;
   superimpositionPlane: 'Cranial Base (S-N at S)' | 'Maxillary (ANS-PNS)' | 'Mandibular (Go-Me)';
   onUpdateLandmark?: (code: string, x: number, y: number) => void;
+  radiographUrl?: string | null;
+  radiographLabel?: string;
+  isImportedTracing?: boolean;
 }
 
 export const CephTracingCanvas: React.FC<CephTracingCanvasProps> = ({
@@ -15,6 +18,9 @@ export const CephTracingCanvas: React.FC<CephTracingCanvasProps> = ({
   showSuperimposition,
   superimpositionPlane,
   onUpdateLandmark,
+  radiographUrl,
+  radiographLabel,
+  isImportedTracing = false,
 }) => {
   const svgRef = React.useRef<SVGSVGElement | null>(null);
   const [draggingCode, setDraggingCode] = React.useState<string | null>(null);
@@ -153,7 +159,22 @@ export const CephTracingCanvas: React.FC<CephTracingCanvasProps> = ({
             {showSuperimposition ? `SUPERIMPOSITION: ${superimpositionPlane}` : `ACTIVE TRACING: ${activeStage}`}
           </span>
           <span className="text-slate-600">·</span>
-          <span className="text-slate-400">Drag landmarks to fine-tune doctor calibration</span>
+          {radiographUrl ? (
+            <span
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold tracking-wide ${
+                isImportedTracing
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+              }`}
+            >
+              ● {isImportedTracing ? 'WEBCEPH TRACING OVERLAY' : 'LATERAL CEPH RADIOGRAPH'}
+              {radiographLabel ? ` · ${radiographLabel}` : ''}
+            </span>
+          ) : (
+            <span className="text-[10px] text-slate-500 font-mono italic">
+              (No radiograph attached for {activeStage})
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-4 font-mono text-[11px]">
           {showSuperimposition ? (
@@ -197,16 +218,34 @@ export const CephTracingCanvas: React.FC<CephTracingCanvasProps> = ({
           </radialGradient>
         </defs>
 
-        <rect width="420" height="380" fill="url(#xrayGlow)" />
-        <rect width="420" height="380" fill="url(#cephGrid)" />
-
-        {/* Cranial Vault Silhouette Background Reference */}
-        <path
-          d="M 75 160 C 45 90, 95 28, 195 30 C 265 32, 300 62, 286 102"
-          fill="none"
-          stroke="rgba(148, 163, 184, 0.18)"
-          strokeWidth="2"
-        />
+        {/* Radiograph Underlay or Synthetic Coordinate Reference */}
+        {radiographUrl ? (
+          <>
+            <image
+              href={radiographUrl}
+              x="0"
+              y="0"
+              width="420"
+              height="380"
+              preserveAspectRatio="xMidYMid meet"
+              opacity={showSuperimposition ? 0.45 : 0.85}
+              className="pointer-events-none"
+            />
+            <rect width="420" height="380" fill="url(#cephGrid)" className="pointer-events-none" />
+          </>
+        ) : (
+          <>
+            <rect width="420" height="380" fill="url(#xrayGlow)" />
+            <rect width="420" height="380" fill="url(#cephGrid)" />
+            {/* Cranial Vault Silhouette Background Reference */}
+            <path
+              d="M 75 160 C 45 90, 95 28, 195 30 C 265 32, 300 62, 286 102"
+              fill="none"
+              stroke="rgba(148, 163, 184, 0.18)"
+              strokeWidth="2"
+            />
+          </>
+        )}
 
         {/* Render Superimposition vs Single Stage */}
         {showSuperimposition ? (

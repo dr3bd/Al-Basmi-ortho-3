@@ -11,6 +11,7 @@ import { runCohort2TreatmentPlanForensicSuite } from './cohort2TreatmentPlanFore
 import { runCohort2ProcedureForensicSuite } from './cohort2ProcedureForensicSuite.ts';
 import { runCohort2OutcomeForensicSuite } from './cohort2OutcomeForensicSuite.ts';
 import { runCohort2CephalometricForensicSuite } from './cohort2CephalometricForensicSuite.ts';
+import { runClinicalUnsavedEditGuardSuite } from './clinicalUnsavedEditGuardSuite.ts';
 import { runUX1DataIntegritySuite } from './clinicalCaseDataIntegritySuite.ts';
 import { runDbFoundationRemediationSuite } from './dbFoundationRemediationSuite.ts';
 import { runSqliteBackupRestoreSuite } from './sqliteBackupRestoreSuite.ts';
@@ -213,6 +214,20 @@ async function main() {
     }
   }
 
+  // 7c. Clinical Unsaved Edit Protection Forensic Suite (Phase P3-J/K-UI-R2)
+  console.log('\n=== STARTING CLINICAL UNSAVED EDIT PROTECTION FORENSIC SUITE (P3-J/K-UI-R2) ===');
+  const uegReport = await runClinicalUnsavedEditGuardSuite({ wasmBinary });
+  console.log(
+    `Unsaved Edit Guard Total: ${uegReport.total}, Passed: ${uegReport.passed}, Failed: ${uegReport.failed}, Blocked: ${uegReport.blocked}`
+  );
+  for (const r of uegReport.results) {
+    console.log(`[${r.status}] ${r.testId} - ${r.name}`);
+    console.log(`       Evidence: ${r.evidence}`);
+    if (r.limitation) {
+      console.log(`       Limitation: ${r.limitation}`);
+    }
+  }
+
   // 8. Clinical Data Integrity & Blank Case State Suite (Phase UX-1)
   console.log('\n=== STARTING UX-1 CLINICAL DATA INTEGRITY & BLANK CASE STATE SUITE ===');
   const ux1Report = await runUX1DataIntegritySuite({ wasmBinary });
@@ -259,6 +274,7 @@ async function main() {
   console.log(`c2OutcomeReport failed: ${c2OutcomeReport.failed}`);
   console.log(`c2MediaReport failed: ${c2MediaReport.failed}`);
   console.log(`c2CephReport failed: ${c2CephReport.failed}`);
+  console.log(`uegReport failed: ${uegReport.failed}`);
   console.log(`ux1Report failed: ${ux1Report.failed}`);
   console.log(`dbfReport failed: ${dbfReport.failed}`);
   console.log(`bkReport failed: ${bkReport.failed}`);
@@ -276,6 +292,7 @@ async function main() {
     c2OutcomeReport.failed > 0 ||
     c2MediaReport.failed > 0 ||
     c2CephReport.failed > 0 ||
+    uegReport.failed > 0 ||
     ux1Report.failed > 0 ||
     dbfReport.failed > 0 ||
     bkReport.failed > 0;

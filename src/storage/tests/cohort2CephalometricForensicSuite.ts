@@ -482,6 +482,104 @@ export async function runCohort2CephalometricForensicSuite(
     }
 
     // ------------------------------------------------------------------------
+    // P3K-12: saveOrUpdateStudy Updates Existing Study Without Duplicate / Orphan Rows
+    // ------------------------------------------------------------------------
+    try {
+      const cephService = new Cohort2CephalometricPersistenceService(adapter);
+
+      // Perform update on existing study 'csth-p3k-001' with modified landmark coords and measurement value
+      const updateRes = await cephService.saveOrUpdateStudy({
+        id: 'csth-p3k-001',
+        caseId: caseRes1.case.id,
+        studyStage: 'T0',
+        landmarks: [
+          { landmarkCode: 'S', x: 30.5, y: 32.5, source: 'MANUAL', reviewStatus: 'APPROVED' },
+          { landmarkCode: 'N', x: 70.0, y: 28.5, source: 'MANUAL', reviewStatus: 'APPROVED' },
+        ],
+        measurements: [
+          {
+            analysisCode: 'STEINER',
+            measurementCode: 'SNA',
+            value: 84.0,
+            unit: '°',
+            referenceValue: 82.0,
+            normalRange: '80-84',
+          },
+          {
+            analysisCode: 'STEINER',
+            measurementCode: 'ANB',
+            value: 4.0,
+            unit: '°',
+            referenceValue: 2.0,
+            normalRange: '0-4',
+          },
+        ],
+        userId: 'usr-dr-albasmi',
+        userRole: 'ORTHODONTIST',
+        deviceId: 'dev-forensic-test',
+        operationId: 'op-p3k-update-001',
+      });
+
+      // Verify study count didn't increase (no duplicate study created)
+      const allStudies = await cephService.listStudiesByCaseId(caseRes1.case.id);
+      const studyRowsWithId = allStudies.filter((s) => s.id === 'csth-p3k-001');
+
+      // Verify landmarks were replaced cleanly (exactly 2 landmarks, with updated coordinates)
+      const updatedLandmarks = await cephService.listLandmarksByStudyId('csth-p3k-001');
+      const sLandmark = updatedLandmarks.find((l) => l.landmark_code === 'S');
+
+      // Verify measurements were replaced cleanly (exactly 2 measurements, with updated values)
+      const updatedMeasurements = await cephService.listMeasurementsByStudyId('csth-p3k-001');
+      const snaMeas = updatedMeasurements.find((m) => m.measurement_code === 'SNA');
+
+      const passed =
+        updateRes.ok === true &&
+        studyRowsWithId.length === 1 &&
+        updatedLandmarks.length === 2 &&
+        sLandmark?.x === 30.5 &&
+        updatedMeasurements.length === 2 &&
+        snaMeas?.value === 84.0;
+
+      addResult(
+        'P3K-12',
+        'saveOrUpdateStudy updates an existing study without duplicate creation or orphaned child rows',
+        passed,
+        `Studies matching ID: ${studyRowsWithId.length}, Landmarks count: ${updatedLandmarks.length} (S.x=${sLandmark?.x}), Measurements count: ${updatedMeasurements.length} (SNA=${snaMeas?.value})`
+      );
+    } catch (err: unknown) {
+      addResult('P3K-12', 'saveOrUpdateStudy update capability', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // P3K-13: saveOrUpdateStudy Audit & Sync Versioning on Update
+    // ------------------------------------------------------------------------
+    try {
+      const audits = await adapter.query(
+        "SELECT * FROM audit_logs WHERE entity_type = 'cephalometric_studies' AND entity_id = ? AND operation_type = 'UPDATE';",
+        ['csth-p3k-001']
+      );
+      const syncs = await adapter.query(
+        "SELECT * FROM sync_operations WHERE entity_type = 'cephalometric_studies' AND entity_id = ? AND operation_type = 'UPDATE';",
+        ['csth-p3k-001']
+      );
+
+      const passed =
+        audits.length === 1 &&
+        syncs.length === 1 &&
+        (audits[0] as any).entity_version_after === 2 &&
+        (syncs[0] as any).result_version === 2;
+
+      addResult(
+        'P3K-13',
+        'saveOrUpdateStudy records UPDATE in audit_logs and sync_operations with version increment',
+        passed,
+        `Update audit count: ${audits.length} (v_after=${(audits[0] as any)?.entity_version_after}), Update sync count: ${syncs.length} (v_res=${(syncs[0] as any)?.result_version})`
+      );
+    } catch (err: unknown) {
+      addResult('P3K-13', 'saveOrUpdateStudy audit & sync integrity', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
     // P3K-11: Full-System Regression Verification
     // ------------------------------------------------------------------------
     try {

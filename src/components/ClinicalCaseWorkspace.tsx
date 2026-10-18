@@ -7,9 +7,13 @@ import {
   CalendarPlus,
   Trash2,
   History,
+  Save,
+  CheckCircle,
+  RefreshCw,
 } from 'lucide-react';
 import {
   CephAnalysisSchool,
+  CephStageRecord,
   ClinicalVisit,
   DomainSection,
   FindingCategory,
@@ -26,6 +30,11 @@ import {
   ClinicalWarning,
   evaluateCephalometricValue,
 } from '../domain/cephalometricEngine';
+import { useClinicalStorage } from '../storage/context/ClinicalStorageContext.tsx';
+import {
+  studyStageToTimepointStage,
+  timepointStageToStudyStage,
+} from '../storage/drivers/cohort2CephalometricPersistenceService.ts';
 import {
   formatDomainSection,
   formatFindingCategory,
@@ -40,6 +49,13 @@ import {
 } from '../utils/i18n';
 import { CephTracingCanvas, ClinicalRecordIllustration } from './CephTracingCanvas';
 import { ClinicalMediaWorkspace } from './media/ClinicalMediaWorkspace';
+
+export interface ClinicalNavigationGuard {
+  isDirty: () => boolean;
+  getDirtyStages: () => TimepointStage[];
+  saveAllDirty: () => Promise<boolean>;
+  discardAllDirty: () => void;
+}
 
 interface ClinicalCaseWorkspaceProps {
   orthoCase?: OrthodonticCase;
@@ -57,6 +73,7 @@ interface ClinicalCaseWorkspaceProps {
   onUpdateCase: (updated: OrthodonticCase, auditAction?: string, auditDetails?: string) => void;
   onAddQuickVisit: (visit: ClinicalVisit) => void;
   onSelectTab?: (tab: ClinicalCaseWorkspaceProps['activeTab']) => void;
+  onRegisterNavigationGuard?: (guard: ClinicalNavigationGuard | null) => void;
 }
 
 export const ClinicalCaseWorkspace: React.FC<ClinicalCaseWorkspaceProps> = ({
@@ -69,6 +86,7 @@ export const ClinicalCaseWorkspace: React.FC<ClinicalCaseWorkspaceProps> = ({
   onUpdateCase,
   onAddQuickVisit,
   onSelectTab,
+  onRegisterNavigationGuard,
 }) => {
   // Cephalometric local state
   const [activeCephStage, setActiveCephStage] = React.useState<TimepointStage>('T0_Initial');
@@ -77,6 +95,246 @@ export const ClinicalCaseWorkspace: React.FC<ClinicalCaseWorkspaceProps> = ({
   const [superimpositionPlane, setSuperimpositionPlane] = React.useState<
     'Cranial Base (S-N at S)' | 'Maxillary (ANS-PNS)' | 'Mandibular (Go-Me)'
   >('Cranial Base (S-N at S)');
+
+  // Clinical SQLite Storage for Cephalometrics
+  const { cohort2CephService, deviceInfo } = useClinicalStorage();
+  const [cephRecords, setCephRecords] = React.useState<CephStageRecord[]>(() => orthoCase?.cephRecords || []);
+  const [editingBuffer, setEditingBuffer] = React.useState<CephStageRecord[]>(() => orthoCase?.cephRecords || []);
+  
+  // Track dirty stages as an authoritative Set of TimepointStages
+  const [dirtyStages, setDirtyStages] = React.useState<Set<TimepointStage>>(new Set());
+  const dirtyStagesRef = React.useRef<Set<TimepointStage>>(new Set());
+  dirtyStagesRef.current = dirtyStages;
+
+  // Track stage revisions to protect against stale asynchronous saves overwriting newer edits
+  const stageRevisions = React.useRef<Record<string, number>>({});
+
+  const markStageDirty = React.useCallback((stage: TimepointStage) => {
+    stageRevisions.current[stage] = (stageRevisions.current[stage] || 0) + 1;
+    setDirtyStages((prev) => {
+      const next = new Set(prev);
+      next.add(stage);
+      return next;
+    });
+  }, []);
+
+  const isDirty = dirtyStages.size > 0;
+  const [cephLoading, setCephLoading] = React.useState<boolean>(false);
+  const [cephSaving, setCephSaving] = React.useState<boolean>(false);
+  const [cephSaveFeedback, setCephSaveFeedback] = React.useState<string | null>(null);
+  const [cephError, setCephError] = React.useState<string | null>(null);
+
+  // Hydrate cephalometric studies from authoritative SQLite
+  React.useEffect(() => {
+    let isMounted = true;
+    async function loadCephFromSqlite() {
+      if (!orthoCase) return;
+      if (orthoCase.isDemo) {
+        if (isMounted) {
+          const demoRecords = orthoCase.cephRecords || [];
+          setCephRecords(demoRecords);
+          setEditingBuffer(demoRecords);
+          setDirtyStages(new Set());
+        }
+        return;
+      }
+
+      if (!cohort2CephService) return;
+
+      try {
+        setCephLoading(true);
+        const studyRows = await cohort2CephService.listStudiesByCaseId(orthoCase.id);
+        if (isMounted) {
+          if (studyRows && studyRows.length > 0) {
+            const mapped: CephStageRecord[] = [];
+            for (const s of studyRows) {
+              const lmRows = await cohort2CephService.listLandmarksByStudyId(s.id);
+              const meRows = await cohort2CephService.listMeasurementsByStudyId(s.id);
+              const values: Record<string, number> = {};
+              for (const m of meRows) {
+                values[m.measurement_code] = m.value;
+              }
+              mapped.push({
+                stage: studyStageToTimepointStage(s.study_stage) as TimepointStage,
+                date: s.study_date,
+                doctorVerified: s.landmark_review_status === 'DOCTOR_APPROVED',
+                values,
+                landmarks: lmRows.map((l) => ({
+                  id: l.id,
+                  code: l.landmark_code as any,
+                  nameAr: l.landmark_code,
+                  nameEn: l.landmark_code,
+                  x: l.x,
+                  y: l.y,
+                  confidence: l.confidence ?? 1.0,
+                  doctorVerified: l.review_status === 'APPROVED',
+                })),
+                superimpositionNotesEn: `Cephalometric study stage ${s.study_stage}`,
+                superimpositionNotesAr: `دراسة سيفالومترية للمرحلة ${s.study_stage}`,
+              });
+            }
+            setCephRecords(mapped);
+            setEditingBuffer(mapped);
+          } else {
+            const base = orthoCase.cephRecords && orthoCase.cephRecords.length > 0
+              ? orthoCase.cephRecords
+              : [];
+            setCephRecords(base);
+            setEditingBuffer(base);
+          }
+          setDirtyStages(new Set());
+        }
+      } catch (err) {
+        console.error('Failed to load cephalometric studies from SQLite:', err);
+      } finally {
+        if (isMounted) setCephLoading(false);
+      }
+    }
+
+    loadCephFromSqlite();
+    return () => {
+      isMounted = false;
+    };
+  }, [orthoCase?.id, cohort2CephService]);
+
+  // Persists all dirty stages or specified stages to SQLite
+  const handleSaveAllDirtyStages = React.useCallback(
+    async (specificStages?: TimepointStage[]): Promise<boolean> => {
+      if (!orthoCase) return false;
+      if (orthoCase.isDemo) {
+        setCephRecords(editingBuffer);
+        setDirtyStages(new Set());
+        setCephSaveFeedback(
+          language === 'ar'
+            ? 'تم حفظ التعديلات في الذاكرة (الحالة التجريبية معزولة عن قاعدة بيانات SQLite).'
+            : 'Edits saved to in-memory state (demo cases are isolated from SQLite).'
+        );
+        setTimeout(() => setCephSaveFeedback(null), 4000);
+        onUpdateCase(
+          { ...orthoCase, cephRecords: editingBuffer },
+          'PERSIST_CEPH_DEMO',
+          'Cephalometric records saved in demo memory'
+        );
+        return true;
+      }
+      if (!cohort2CephService) {
+        setCephError(
+          language === 'ar'
+            ? 'محرك التخزين السريري SQLite غير متوفر حالياً.'
+            : 'Cohort2CephalometricPersistenceService is unavailable.'
+        );
+        return false;
+      }
+
+      setCephSaving(true);
+      setCephError(null);
+      setCephSaveFeedback(null);
+
+      const stagesToPersist =
+        specificStages && specificStages.length > 0
+          ? specificStages
+          : dirtyStagesRef.current.size > 0
+          ? Array.from(dirtyStagesRef.current)
+          : [activeCephStage];
+
+      try {
+        const successfullyPersistedStages: TimepointStage[] = [];
+
+        for (const stage of stagesToPersist) {
+          const rec = editingBuffer.find((r) => r.stage === stage);
+          if (!rec) continue;
+
+          // Snapshot revision before awaiting async save
+          const saveRev = stageRevisions.current[stage] || 0;
+
+          await cohort2CephService.saveOrUpdateStudy({
+            caseId: orthoCase.id,
+            studyStage: timepointStageToStudyStage(stage),
+            studyDate: rec.date || new Date().toISOString().slice(0, 10),
+            landmarks: (rec.landmarks || []).map((lm) => ({
+              landmarkCode: lm.code,
+              x: lm.x,
+              y: lm.y,
+              source: 'MANUAL',
+              reviewStatus: 'APPROVED',
+            })),
+            measurements: Object.entries(rec.values || {}).map(([code, val]) => {
+              const def = CEPHALOMETRIC_DEFINITIONS.find((d) => d.code === code);
+              return {
+                analysisCode: def?.school?.toUpperCase() || 'STEINER',
+                measurementCode: code,
+                value: val,
+                unit: def?.unit || '°',
+                referenceValue: def?.normMean ?? null,
+                normalRange: def ? `${def.normMean - def.normSd}-${def.normMean + def.normSd}` : null,
+                interpretation: null,
+              };
+            }),
+            userId: 'usr-dr-albasmi',
+            userRole: 'ORTHODONTIST',
+            deviceId: deviceInfo?.deviceId || 'dev-browser-client',
+          });
+
+          // Check if newer edits were made to this stage while async save was in-flight
+          if ((stageRevisions.current[stage] || 0) === saveRev) {
+            successfullyPersistedStages.push(stage);
+          }
+        }
+
+        // Update dirtyStages removing only stages that had no subsequent edits
+        setDirtyStages((prev) => {
+          const next = new Set(prev);
+          for (const st of successfullyPersistedStages) {
+            next.delete(st);
+          }
+          return next;
+        });
+
+        setCephRecords(editingBuffer);
+        setCephSaveFeedback(
+          language === 'ar'
+            ? `تم حفظ ${stagesToPersist.length} دراسة سيفالومترية في SQLite بنجاح.`
+            : `Persisted ${stagesToPersist.length} cephalometric study record(s) to SQLite.`
+        );
+        setTimeout(() => setCephSaveFeedback(null), 4000);
+
+        onUpdateCase(
+          { ...orthoCase, cephRecords: editingBuffer },
+          'PERSIST_CEPH_STUDY',
+          `Cephalometric studies persisted to SQLite for: ${stagesToPersist.join(', ')}`
+        );
+
+        return true;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setCephError(msg);
+        return false;
+      } finally {
+        setCephSaving(false);
+      }
+    },
+    [orthoCase, editingBuffer, activeCephStage, cohort2CephService, deviceInfo, language, onUpdateCase]
+  );
+
+  const handleDiscardAllDirty = React.useCallback(() => {
+    setEditingBuffer(cephRecords);
+    setDirtyStages(new Set());
+    setCephError(null);
+    setCephSaveFeedback(null);
+  }, [cephRecords]);
+
+  // Register Navigation Guard with parent (App.tsx)
+  React.useEffect(() => {
+    onRegisterNavigationGuard?.({
+      isDirty: () => dirtyStagesRef.current.size > 0,
+      getDirtyStages: () => Array.from(dirtyStagesRef.current),
+      saveAllDirty: () => handleSaveAllDirtyStages(),
+      discardAllDirty: handleDiscardAllDirty,
+    });
+    return () => {
+      onRegisterNavigationGuard?.(null);
+    };
+  }, [onRegisterNavigationGuard, handleSaveAllDirtyStages, handleDiscardAllDirty]);
 
   // Problem list new entry state
   const [newProbDomain, setNewProbDomain] = React.useState<DomainSection>('Occlusal');
@@ -1422,11 +1680,58 @@ export const ClinicalCaseWorkspace: React.FC<ClinicalCaseWorkspaceProps> = ({
 
   // 3. CEPHALOMETRICS & SUPERIMPOSITION TAB
   if (activeTab === 'cephalometrics') {
+    const currentRecords = editingBuffer.length > 0 ? editingBuffer : (orthoCase.cephRecords || []);
     const currentCeph =
-      orthoCase.cephRecords.find((r) => r.stage === activeCephStage) || orthoCase.cephRecords[0];
-    const t0Ceph = orthoCase.cephRecords.find((r) => r.stage === 'T0_Initial');
-    const t1Ceph = orthoCase.cephRecords.find((r) => r.stage === 'T1_Progress');
-    const t3Ceph = orthoCase.cephRecords.find((r) => r.stage === 'T3_Final');
+      currentRecords.find((r) => r.stage === activeCephStage) || currentRecords[0];
+    const t0Ceph = currentRecords.find((r) => r.stage === 'T0_Initial');
+    const t1Ceph = currentRecords.find((r) => r.stage === 'T1_Progress');
+    const t3Ceph = currentRecords.find((r) => r.stage === 'T3_Final');
+
+    // Resolve radiograph strictly matching activeCephStage and case
+    const activeStageRadiograph = (orthoCase?.photos || []).find(
+      (p) =>
+        p.stage === activeCephStage &&
+        (p.category === 'Lateral Ceph' ||
+          p.category.toLowerCase().includes('lateral ceph') ||
+          p.category.toLowerCase().includes('cephalometric'))
+    );
+    const isImportedTracing = Boolean(
+      activeStageRadiograph?.captionEn?.toLowerCase().includes('tracing') ||
+      activeStageRadiograph?.captionEn?.toLowerCase().includes('webceph') ||
+      activeStageRadiograph?.svgType?.includes('tracing')
+    );
+
+    const handleMeasurementChange = (stage: TimepointStage, code: string, rawVal: string) => {
+      const num = rawVal === '' ? undefined : Number(rawVal);
+      setEditingBuffer((prev) => {
+        const exists = prev.some((r) => r.stage === stage);
+        if (!exists) {
+          return [
+            ...prev,
+            {
+              stage,
+              date: new Date().toISOString().slice(0, 10),
+              doctorVerified: true,
+              values: num !== undefined && !isNaN(num) ? { [code]: num } : {},
+              landmarks: [],
+              superimpositionNotesEn: '',
+              superimpositionNotesAr: '',
+            },
+          ];
+        }
+        return prev.map((r) => {
+          if (r.stage !== stage) return r;
+          const nextValues = { ...r.values };
+          if (num !== undefined && !isNaN(num)) {
+            nextValues[code] = num;
+          } else {
+            delete nextValues[code];
+          }
+          return { ...r, values: nextValues };
+        });
+      });
+      markStageDirty(stage);
+    };
 
     const filteredDefs =
       selectedSchool === 'All'
@@ -1438,15 +1743,24 @@ export const ClinicalCaseWorkspace: React.FC<ClinicalCaseWorkspaceProps> = ({
         <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
             <div>
-              <h2 className="text-base font-semibold text-slate-900">
-                {language === 'ar'
-                  ? 'وحدة التحليل السيفالومتري والمطابقة الزمنية (Steiner / Tweed / McNamara / Downs / Jarabak)'
-                  : 'Multi-School Cephalometric Module & Longitudinal Superimposition (T0 → T1 → T3)'}
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-semibold text-slate-900">
+                  {language === 'ar'
+                    ? 'وحدة التحليل السيفالومتري والمطابقة الزمنية (Steiner / Tweed / McNamara / Downs / Jarabak)'
+                    : 'Multi-School Cephalometric Module & Longitudinal Superimposition (T0 → T1 → T3)'}
+                </h2>
+                {isDirty && (
+                  <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
+                    {language === 'ar'
+                      ? `تعديلات غير محفوظة (${Array.from(dirtyStages).map(s => formatTimepointStage(language, s)).join(', ')})`
+                      : `Unsaved Tracing Edits (${Array.from(dirtyStages).join(', ')})`}
+                  </span>
+                )}
+              </div>
               <p className="text-xs text-slate-500">
                 {language === 'ar'
-                  ? 'تحقق تفاعلي من النقاط التشريحية مع حساب فوري للانحرافات والتفسير السريري عبر مراحل العلاج.'
-                  : 'Interactive landmark verification + live deviation Z-score engine across multiple cephalometric analyses.'}
+                  ? 'تحقق تفاعلي من النقاط التشريحية مع حساب فوري للانحرافات وحفظ موثوق في قاعدة بيانات SQLite.'
+                  : 'Interactive landmark verification + live deviation Z-score engine with authoritative SQLite persistence.'}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -1468,30 +1782,95 @@ export const ClinicalCaseWorkspace: React.FC<ClinicalCaseWorkspaceProps> = ({
                   ? 'المطابقة السيفالومترية (Superimposition T0/T1/T3)'
                   : 'Longitudinal Superimposition (T0 / T1 / T3)'}
               </button>
+              <button
+                onClick={() => handleSaveAllDirtyStages()}
+                disabled={cephSaving}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold shadow-xs transition-colors ${
+                  isDirty
+                    ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                    : 'bg-emerald-700 hover:bg-emerald-800 text-white'
+                }`}
+              >
+                {cephSaving ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    {language === 'ar' ? 'جارٍ الحفظ في SQLite...' : 'Saving to SQLite...'}
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-3.5 h-3.5" />
+                    {language === 'ar'
+                      ? isDirty
+                        ? dirtyStages.size > 1
+                          ? `حفظ التعديلات في SQLite (${dirtyStages.size} مراحل)`
+                          : 'حفظ التعديلات في SQLite'
+                        : 'حفظ الدراسة في SQLite'
+                      : isDirty
+                      ? dirtyStages.size > 1
+                        ? `Save All to SQLite (${dirtyStages.size} stages)`
+                        : 'Save Tracing to SQLite'
+                      : 'Save Study to SQLite'}
+                  </>
+                )}
+              </button>
             </div>
           </div>
+
+          {cephLoading && (
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700 flex items-center gap-2">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              <span>
+                {language === 'ar'
+                  ? 'جارٍ قراءة القياسات والنقاط التشريحية من قاعدة بيانات SQLite...'
+                  : 'Loading authoritative cephalometric studies from SQLite...'}
+              </span>
+            </div>
+          )}
+
+          {cephSaveFeedback && (
+            <div className="p-3 bg-emerald-50 border border-emerald-300 rounded text-xs text-emerald-800 flex items-center gap-2 font-medium">
+              <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{cephSaveFeedback}</span>
+            </div>
+          )}
+
+          {cephError && (
+            <div className="p-3 bg-rose-50 border border-rose-300 rounded text-xs text-rose-800 flex items-center gap-2 font-medium">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{cephError}</span>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             {/* Left 5 cols: Interactive Tracing & Superimposition Canvas */}
             <div className="lg:col-span-5 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
-                  {(['T0_Initial', 'T1_Progress', 'T3_Final'] as TimepointStage[]).map((st) => (
-                    <button
-                      key={st}
-                      onClick={() => {
-                        setActiveCephStage(st);
-                        setShowSuperimposition(false);
-                      }}
-                      className={`px-2.5 py-1 rounded text-xs font-medium ${
-                        activeCephStage === st && !showSuperimposition
-                          ? 'bg-white text-slate-900 shadow-xs font-semibold'
-                          : 'text-slate-600'
-                      }`}
-                    >
-                      {formatTimepointStage(language, st)}
-                    </button>
-                  ))}
+                  {(['T0_Initial', 'T1_Progress', 'T3_Final'] as TimepointStage[]).map((st) => {
+                    const isStageDirty = dirtyStages.has(st);
+                    return (
+                      <button
+                        key={st}
+                        onClick={() => {
+                          setActiveCephStage(st);
+                          setShowSuperimposition(false);
+                        }}
+                        className={`px-2.5 py-1 rounded text-xs font-medium flex items-center gap-1.5 ${
+                          activeCephStage === st && !showSuperimposition
+                            ? 'bg-white text-slate-900 shadow-xs font-semibold'
+                            : 'text-slate-600'
+                        }`}
+                      >
+                        <span>{formatTimepointStage(language, st)}</span>
+                        {isStageDirty && (
+                          <span
+                            className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"
+                            title={language === 'ar' ? 'تعديلات غير محفوظة' : 'Unsaved edits'}
+                          />
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
                 {showSuperimposition && (
                   <select
@@ -1526,22 +1905,66 @@ export const ClinicalCaseWorkspace: React.FC<ClinicalCaseWorkspaceProps> = ({
               </div>
 
               <CephTracingCanvas
-                records={orthoCase.cephRecords}
+                records={currentRecords}
                 activeStage={activeCephStage}
                 showSuperimposition={showSuperimposition}
                 superimpositionPlane={superimpositionPlane}
+                radiographUrl={activeStageRadiograph?.dataUrl || null}
+                radiographLabel={activeStageRadiograph?.captionEn || activeStageRadiograph?.category}
+                isImportedTracing={isImportedTracing}
                 onUpdateLandmark={(code, x, y) => {
-                  if (!currentCeph) return;
-                  const updatedRecords = orthoCase.cephRecords.map((rec) => {
-                    if (rec.stage !== currentCeph.stage) return rec;
-                    return {
-                      ...rec,
-                      landmarks: rec.landmarks.map((lm) =>
-                        lm.code === code ? { ...lm, x, y } : lm
-                      ),
-                    };
+                  setEditingBuffer((prev) => {
+                    const exists = prev.some((r) => r.stage === activeCephStage);
+                    if (!exists) {
+                      return [
+                        ...prev,
+                        {
+                          stage: activeCephStage,
+                          date: new Date().toISOString().slice(0, 10),
+                          doctorVerified: true,
+                          values: {},
+                          landmarks: [
+                            {
+                              id: `clm-${code}`,
+                              code: code as any,
+                              nameAr: code,
+                              nameEn: code,
+                              x,
+                              y,
+                              confidence: 1.0,
+                              doctorVerified: true,
+                            },
+                          ],
+                          superimpositionNotesEn: '',
+                          superimpositionNotesAr: '',
+                        },
+                      ];
+                    }
+                    return prev.map((rec) => {
+                      if (rec.stage !== activeCephStage) return rec;
+                      const lmExists = rec.landmarks.some((lm) => lm.code === code);
+                      const updatedLandmarks = lmExists
+                        ? rec.landmarks.map((lm) => (lm.code === code ? { ...lm, x, y } : lm))
+                        : [
+                            ...rec.landmarks,
+                            {
+                              id: `clm-${code}`,
+                              code: code as any,
+                              nameAr: code,
+                              nameEn: code,
+                              x,
+                              y,
+                              confidence: 1.0,
+                              doctorVerified: true,
+                            },
+                          ];
+                      return {
+                        ...rec,
+                        landmarks: updatedLandmarks,
+                      };
+                    });
                   });
-                  onUpdateCase({ ...orthoCase, cephRecords: updatedRecords });
+                  markStageDirty(activeCephStage);
                 }}
               />
 
@@ -1635,23 +2058,30 @@ export const ClinicalCaseWorkspace: React.FC<ClinicalCaseWorkspaceProps> = ({
                               type="number"
                               step="0.5"
                               value={v0 ?? ''}
-                              onChange={(e) => {
-                                const num = Number(e.target.value);
-                                const updated = orthoCase.cephRecords.map((r) =>
-                                  r.stage === 'T0_Initial'
-                                    ? { ...r, values: { ...r.values, [def.code]: num } }
-                                    : r
-                                );
-                                onUpdateCase({ ...orthoCase, cephRecords: updated });
-                              }}
-                              className="w-16 px-1.5 py-0.5 text-end border border-slate-300 rounded font-mono bg-white"
+                              onChange={(e) => handleMeasurementChange('T0_Initial', def.code, e.target.value)}
+                              className="w-16 px-1.5 py-0.5 text-end border border-slate-300 rounded font-mono bg-white focus:outline-blue-500 focus:border-blue-500"
+                              placeholder="—"
                             />
                           </td>
-                          <td className="py-2 px-2 text-end font-mono text-blue-700">
-                            {v1 !== undefined ? `${v1}${def.unit}` : '—'}
+                          <td className="py-2 px-2 text-end font-mono">
+                            <input
+                              type="number"
+                              step="0.5"
+                              value={v1 ?? ''}
+                              onChange={(e) => handleMeasurementChange('T1_Progress', def.code, e.target.value)}
+                              className="w-16 px-1.5 py-0.5 text-end border border-slate-300 rounded font-mono bg-white text-blue-700 font-medium focus:outline-blue-500 focus:border-blue-500"
+                              placeholder="—"
+                            />
                           </td>
-                          <td className="py-2 px-2 text-end font-mono text-emerald-700 font-semibold">
-                            {v3 !== undefined ? `${v3}${def.unit}` : '—'}
+                          <td className="py-2 px-2 text-end font-mono">
+                            <input
+                              type="number"
+                              step="0.5"
+                              value={v3 ?? ''}
+                              onChange={(e) => handleMeasurementChange('T3_Final', def.code, e.target.value)}
+                              className="w-16 px-1.5 py-0.5 text-end border border-slate-300 rounded font-mono bg-white text-emerald-700 font-semibold focus:outline-emerald-500 focus:border-emerald-500"
+                              placeholder="—"
+                            />
                           </td>
                           <td className="py-2 px-2 text-end font-mono font-semibold">
                             {delta !== '—' ? `${Number(delta) > 0 ? '+' : ''}${delta}` : '—'}
@@ -2083,8 +2513,9 @@ export const ClinicalCaseWorkspace: React.FC<ClinicalCaseWorkspaceProps> = ({
   }
 
   // 6. MEDIA & BEFORE / PROGRESS / FINAL COMPARISON TAB
-  const t0Ceph = orthoCase.cephRecords.find((r) => r.stage === 'T0_Initial');
-  const t3Ceph = orthoCase.cephRecords.find((r) => r.stage === 'T3_Final');
+  const comparisonRecords = cephRecords.length > 0 ? cephRecords : (orthoCase.cephRecords || []);
+  const t0Ceph = comparisonRecords.find((r) => r.stage === 'T0_Initial');
+  const t3Ceph = comparisonRecords.find((r) => r.stage === 'T3_Final');
 
   return (
     <div className="space-y-6">

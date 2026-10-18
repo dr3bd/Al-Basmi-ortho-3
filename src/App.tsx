@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   Activity,
+  AlertCircle,
   AlertTriangle,
   BrainCircuit,
   Calendar,
@@ -13,6 +14,8 @@ import {
   Languages,
   Package,
   Plus,
+  RefreshCw,
+  Save,
   Search,
   Stethoscope,
   Wifi,
@@ -57,8 +60,9 @@ import {
 import {
   formatCaseStatus,
   formatSkeletalSagittal,
+  formatTimepointStage,
 } from './utils/i18n';
-import { ClinicalCaseWorkspace } from './components/ClinicalCaseWorkspace';
+import { ClinicalCaseWorkspace, ClinicalNavigationGuard } from './components/ClinicalCaseWorkspace';
 import { P3ClinicalCoreWorkspace } from './components/P3ClinicalCoreWorkspace';
 import { ReportEngineView } from './components/ReportEngineView';
 import { AIDecisionSupportView } from './components/AIDecisionSupportView';
@@ -68,6 +72,8 @@ import { PatientDetailView } from './components/patient/PatientDetailView';
 import { NewPatientModal } from './components/patient/NewPatientModal';
 import { useClinicalStorage } from './storage/context/ClinicalStorageContext.tsx';
 import { IBrowserMediaBlobStore } from './storage/drivers/browserMediaBlobStore.ts';
+import { studyStageToTimepointStage } from './storage/drivers/cohort2CephalometricPersistenceService.ts';
+import { CephStageRecord } from './types/orthodontics.ts';
 import {
   SqlitePatientRow,
   SqliteOrthodonticCaseRow,
@@ -487,7 +493,8 @@ function mapSqliteCaseToUi(
   examFindings?: SqliteClinicalFindingRow[],
   photos: ClinicalPhotoRecord[] = [],
   diagnosisHistory: DiagnosisRecord[] = [],
-  treatmentOptions: TreatmentOption[] = []
+  treatmentOptions: TreatmentOption[] = [],
+  cephRecords: CephStageRecord[] = []
 ): OrthodonticCase {
   const caseTypeUiMap: Record<string, OrthodonticCase['caseType']> = {
     COMPREHENSIVE: 'Comprehensive Fixed Appliance',
@@ -538,7 +545,7 @@ function mapSqliteCaseToUi(
     diagnosis: diagnosis || createBlankDiagnosisRecord(row.start_date),
     diagnosisHistory: diagnosisHistory.length > 0 ? diagnosisHistory : (diagnosis ? [diagnosis] : []),
     treatmentOptions: treatmentOptions && treatmentOptions.length > 0 ? treatmentOptions : [],
-    cephRecords: [],
+    cephRecords: cephRecords && cephRecords.length > 0 ? cephRecords : [],
     visits,
     photos: photos,
     retentionAndResidual: createBlankRetentionRecord(),
@@ -595,6 +602,7 @@ export default function App() {
     cohort2ProblemDiagnosisService,
     cohort2TreatmentPlanService,
     cohort2MediaService,
+    cohort2CephService,
     mediaBlobStore,
     deviceInfo,
     status: storageStatus,
@@ -606,6 +614,61 @@ export default function App() {
   } = useClinicalStorage();
   const [persistenceError, setPersistenceError] = React.useState<string | null>(null);
   const [isCreatingCase, setIsCreatingCase] = React.useState<boolean>(false);
+
+  // Clinical Navigation Guard (P3-J/K-UI-R2: Unsaved Clinical Edit Protection)
+  const clinicalGuardRef = React.useRef<ClinicalNavigationGuard | null>(null);
+  const [showUnsavedModal, setShowUnsavedModal] = React.useState<boolean>(false);
+  const [pendingNavAction, setPendingNavAction] = React.useState<(() => void) | null>(null);
+  const [isGuardSaving, setIsGuardSaving] = React.useState<boolean>(false);
+  const [guardErrorMessage, setGuardErrorMessage] = React.useState<string | null>(null);
+
+  const executeWithNavigationGuard = React.useCallback((action: () => void) => {
+    if (clinicalGuardRef.current && clinicalGuardRef.current.isDirty()) {
+      setPendingNavAction(() => action);
+      setGuardErrorMessage(null);
+      setShowUnsavedModal(true);
+    } else {
+      action();
+    }
+  }, []);
+
+  const handleNavigateNav = React.useCallback(
+    (nav: PrimaryNavSection) => {
+      executeWithNavigationGuard(() => setActiveNav(nav));
+    },
+    [executeWithNavigationGuard]
+  );
+
+  const handleSelectCaseGuarded = React.useCallback(
+    (caseId: string, alsoSetNavWorkspace = false) => {
+      executeWithNavigationGuard(() => {
+        setSelectedCaseId(caseId);
+        if (alsoSetNavWorkspace) {
+          setActiveNav('case_workspace');
+        }
+      });
+    },
+    [executeWithNavigationGuard]
+  );
+
+  const handleSelectCaseTabGuarded = React.useCallback(
+    (tab: CaseSubTab) => {
+      executeWithNavigationGuard(() => setActiveCaseTab(tab));
+    },
+    [executeWithNavigationGuard]
+  );
+
+  // Window beforeunload listener
+  React.useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (clinicalGuardRef.current && clinicalGuardRef.current.isDirty()) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
 
   // In-memory display projection of patients (authoritatively loaded from SQLite upon storage readiness)
   const [patients, setPatients] = React.useState<Patient[]>(INITIAL_PATIENTS);
@@ -798,6 +861,41 @@ export default function App() {
                 }
               }
 
+              let caseCephRecords: CephStageRecord[] = [];
+              if (cohort2CephService) {
+                try {
+                  const studyRows = await cohort2CephService.listStudiesByCaseId(row.id);
+                  for (const study of studyRows) {
+                    const landmarks = await cohort2CephService.listLandmarksByStudyId(study.id);
+                    const measurements = await cohort2CephService.listMeasurementsByStudyId(study.id);
+                    const values: Record<string, number> = {};
+                    for (const m of measurements) {
+                      values[m.measurement_code] = m.value;
+                    }
+                    caseCephRecords.push({
+                      stage: studyStageToTimepointStage(study.study_stage),
+                      date: study.study_date,
+                      doctorVerified: study.landmark_review_status === 'DOCTOR_APPROVED',
+                      values,
+                      landmarks: landmarks.map((l) => ({
+                        id: l.id,
+                        code: l.landmark_code as any,
+                        nameAr: l.landmark_code,
+                        nameEn: l.landmark_code,
+                        x: l.x,
+                        y: l.y,
+                        confidence: l.confidence ?? 1.0,
+                        doctorVerified: l.review_status === 'APPROVED',
+                      })),
+                      superimpositionNotesEn: `Cephalometric study stage ${study.study_stage}`,
+                      superimpositionNotesAr: `دراسة سيفالومترية للمرحلة ${study.study_stage}`,
+                    });
+                  }
+                } catch {
+                  // Ignore ceph load failure for single case
+                }
+              }
+
               mappedCases.push(
                 mapSqliteCaseToUi(
                   row,
@@ -808,7 +906,8 @@ export default function App() {
                   examFindings,
                   casePhotos,
                   caseDiagnosisHistory,
-                  caseTreatmentOptions
+                  caseTreatmentOptions,
+                  caseCephRecords
                 )
               );
             }
@@ -837,6 +936,7 @@ export default function App() {
     cohort2ProblemDiagnosisService,
     cohort2TreatmentPlanService,
     cohort2MediaService,
+    cohort2CephService,
     mediaBlobStore,
     patients,
   ]);
@@ -1998,7 +2098,7 @@ export default function App() {
         {/* Zone 2: 6 Primary Navigation Links */}
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
           <button
-            onClick={() => setActiveNav('dashboard')}
+            onClick={() => handleNavigateNav('dashboard')}
             className={`py-1 transition-colors whitespace-nowrap ${
               activeNav === 'dashboard'
                 ? 'text-blue-600 border-b-2 border-blue-600 font-semibold'
@@ -2008,7 +2108,7 @@ export default function App() {
             {language === 'ar' ? 'لوحة العيادة' : 'Clinic Overview'}
           </button>
           <button
-            onClick={() => setActiveNav('patients')}
+            onClick={() => handleNavigateNav('patients')}
             className={`py-1 transition-colors whitespace-nowrap ${
               activeNav === 'patients'
                 ? 'text-blue-600 border-b-2 border-blue-600 font-semibold'
@@ -2018,7 +2118,7 @@ export default function App() {
             {language === 'ar' ? 'سجل المرضى' : 'Patients'}
           </button>
           <button
-            onClick={() => setActiveNav('case_workspace')}
+            onClick={() => handleNavigateNav('case_workspace')}
             className={`py-1 transition-colors whitespace-nowrap ${
               activeNav === 'case_workspace'
                 ? 'text-blue-600 border-b-2 border-blue-600 font-semibold'
@@ -2028,7 +2128,7 @@ export default function App() {
             {language === 'ar' ? 'الملف السريري والسيفالومتري' : 'Clinical & Ceph Workspace'}
           </button>
           <button
-            onClick={() => setActiveNav('reports')}
+            onClick={() => handleNavigateNav('reports')}
             className={`py-1 transition-colors whitespace-nowrap ${
               activeNav === 'reports'
                 ? 'text-blue-600 border-b-2 border-blue-600 font-semibold'
@@ -2038,7 +2138,7 @@ export default function App() {
             {language === 'ar' ? 'التقارير العلمية' : 'Scientific Reports'}
           </button>
           <button
-            onClick={() => setActiveNav('ai_assistant')}
+            onClick={() => handleNavigateNav('ai_assistant')}
             className={`py-1 transition-colors whitespace-nowrap ${
               activeNav === 'ai_assistant'
                 ? 'text-blue-600 border-b-2 border-blue-600 font-semibold'
@@ -2048,7 +2148,7 @@ export default function App() {
             {language === 'ar' ? 'المساعد التقويمي الذكي' : 'AI Co-Pilot'}
           </button>
           <button
-            onClick={() => setActiveNav('operations')}
+            onClick={() => handleNavigateNav('operations')}
             className={`py-1 transition-colors whitespace-nowrap ${
               activeNav === 'operations'
                 ? 'text-blue-600 border-b-2 border-blue-600 font-semibold'
@@ -2175,7 +2275,7 @@ export default function App() {
                 return (
                   <button
                     key={c.id}
-                    onClick={() => setSelectedCaseId(c.id)}
+                    onClick={() => handleSelectCaseGuarded(c.id)}
                     className={`w-full text-start p-3 rounded-lg border transition-colors ${
                       isSelected
                         ? 'bg-slate-900 text-white border-slate-900'
@@ -2366,8 +2466,10 @@ export default function App() {
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={() => {
-                    setActiveNav('case_workspace');
-                    setActiveCaseTab('media_comparison');
+                    executeWithNavigationGuard(() => {
+                      setActiveNav('case_workspace');
+                      setActiveCaseTab('media_comparison');
+                    });
                   }}
                   className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-md text-xs font-semibold transition-colors whitespace-nowrap flex items-center gap-1.5"
                 >
@@ -2376,8 +2478,10 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => {
-                    setActiveNav('case_workspace');
-                    setActiveCaseTab('visits_progress');
+                    executeWithNavigationGuard(() => {
+                      setActiveNav('case_workspace');
+                      setActiveCaseTab('visits_progress');
+                    });
                   }}
                   className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-md text-xs font-medium transition-colors whitespace-nowrap"
                 >
@@ -2385,8 +2489,10 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => {
-                    setActiveNav('case_workspace');
-                    setActiveCaseTab('cephalometrics');
+                    executeWithNavigationGuard(() => {
+                      setActiveNav('case_workspace');
+                      setActiveCaseTab('cephalometrics');
+                    });
                   }}
                   className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-md text-xs font-medium transition-colors whitespace-nowrap"
                 >
@@ -2395,13 +2501,13 @@ export default function App() {
                     : 'Ceph & Superimposition'}
                 </button>
                 <button
-                  onClick={() => setActiveNav('ai_assistant')}
+                  onClick={() => handleNavigateNav('ai_assistant')}
                   className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-md text-xs font-medium transition-colors whitespace-nowrap"
                 >
                   {language === 'ar' ? 'مناقشة الحالة بالذكاء الاصطناعي' : 'AI Case Discussion'}
                 </button>
                 <button
-                  onClick={() => setActiveNav('reports')}
+                  onClick={() => handleNavigateNav('reports')}
                   className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-semibold transition-colors whitespace-nowrap"
                 >
                   {language === 'ar' ? 'إصدار التقرير العلمي' : 'Generate Scientific Report'}
@@ -2529,10 +2635,7 @@ export default function App() {
                             </td>
                             <td className="py-3 text-end">
                               <button
-                                onClick={() => {
-                                  setSelectedCaseId(c.id);
-                                  setActiveNav('case_workspace');
-                                }}
+                                onClick={() => handleSelectCaseGuarded(c.id, true)}
                                 className="px-3 py-1 bg-slate-900 text-white rounded text-[11px] font-medium hover:bg-slate-800"
                               >
                                 {language === 'ar' ? 'فتح الملف' : 'Open Record'}
@@ -2559,7 +2662,7 @@ export default function App() {
                     setSelectedPatientId(id);
                     const matchingCase = visibleCases.find((c) => c.patientId === id);
                     if (matchingCase) {
-                      setSelectedCaseId(matchingCase.id);
+                      handleSelectCaseGuarded(matchingCase.id);
                     }
                   }}
                   onOpenNewPatientModal={() => setShowNewPatientModal(true)}
@@ -2575,8 +2678,7 @@ export default function App() {
                   cases={visibleCases}
                   activeCaseId={activeCase?.id || null}
                   onSelectCase={(caseId) => {
-                    setSelectedCaseId(caseId);
-                    setActiveNav('case_workspace');
+                    handleSelectCaseGuarded(caseId, true);
                   }}
                   onOpenNewCaseModal={() => handleOpenNewCaseModal(activePatient?.id)}
                   language={language}
@@ -2627,7 +2729,7 @@ export default function App() {
                 ).map((tItem) => (
                   <button
                     key={tItem.id}
-                    onClick={() => setActiveCaseTab(tItem.id)}
+                    onClick={() => handleSelectCaseTabGuarded(tItem.id)}
                     className={`px-3 py-2 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
                       activeCaseTab === tItem.id
                         ? 'bg-white text-slate-900 shadow-xs'
@@ -2648,7 +2750,10 @@ export default function App() {
                 activeTab={activeCaseTab}
                 onUpdateCase={handleUpdateCase}
                 onAddQuickVisit={handleAddQuickVisit}
-                onSelectTab={setActiveCaseTab}
+                onSelectTab={handleSelectCaseTabGuarded}
+                onRegisterNavigationGuard={(guard) => {
+                  clinicalGuardRef.current = guard;
+                }}
               />
             </div>
           )}
@@ -2974,6 +3079,124 @@ export default function App() {
         isDurable={isDurable}
         storageMode={storageMode}
       />
+
+      {/* UNSAVED CLINICAL EDIT PROTECTION MODAL (P3-J/K-UI-R2) */}
+      {showUnsavedModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full border border-slate-200 overflow-hidden">
+            {/* Header */}
+            <div className="p-5 border-b border-slate-100 flex items-center gap-3 bg-amber-50/70">
+              <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  {language === 'ar' ? 'تعديلات سريرية غير محفوظة' : 'Unsaved Clinical Cephalometric Edits'}
+                </h3>
+                <p className="text-xs text-amber-800">
+                  {language === 'ar'
+                    ? 'توجد تعديلات على النقاط التشريحية أو القياسات لم يتم حفظها في قاعدة بيانات SQLite.'
+                    : 'There are unsaved landmark coordinates or measurements pending SQLite persistence.'}
+                </p>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="p-5 space-y-3">
+              <p className="text-sm text-slate-700 leading-relaxed">
+                {language === 'ar'
+                  ? `لديك تعديلات غير محفوظة في المراحل السيفالومترية (${
+                      clinicalGuardRef.current?.getDirtyStages().map((s) => formatTimepointStage(language, s)).join(', ') || 'الحالية'
+                    }). هل ترغب في حفظ التعديلات في قاعدة البيانات قبل المتابعة، أم تجاهلها، أم البقاء في الحالة الحالية؟`
+                  : `You have unsaved changes in cephalometric stages (${
+                      clinicalGuardRef.current?.getDirtyStages().join(', ') || 'current'
+                    }). Would you like to save changes to SQLite before proceeding, discard them, or cancel navigation?`}
+              </p>
+
+              {guardErrorMessage && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-800 font-medium flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{guardErrorMessage}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Actions: Explicit Cancel, Discard, Save & Proceed */}
+            <div className="p-4 bg-slate-50 border-t border-slate-100 flex flex-wrap items-center justify-end gap-2.5">
+              <button
+                type="button"
+                disabled={isGuardSaving}
+                onClick={() => {
+                  setShowUnsavedModal(false);
+                  setPendingNavAction(null);
+                  setGuardErrorMessage(null);
+                }}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-white border border-slate-300 rounded-lg hover:bg-slate-100 transition-colors"
+              >
+                {language === 'ar' ? 'إلغاء (البقاء في الحالة)' : 'Cancel (Stay Here)'}
+              </button>
+
+              <button
+                type="button"
+                disabled={isGuardSaving}
+                onClick={() => {
+                  clinicalGuardRef.current?.discardAllDirty();
+                  setShowUnsavedModal(false);
+                  setGuardErrorMessage(null);
+                  const action = pendingNavAction;
+                  setPendingNavAction(null);
+                  if (action) action();
+                }}
+                className="px-4 py-2 text-xs font-semibold text-rose-700 hover:text-rose-800 bg-rose-50 border border-rose-200 rounded-lg hover:bg-rose-100 transition-colors"
+              >
+                {language === 'ar' ? 'تجاهل التعديلات' : 'Discard Edits'}
+              </button>
+
+              <button
+                type="button"
+                disabled={isGuardSaving}
+                onClick={async () => {
+                  setIsGuardSaving(true);
+                  setGuardErrorMessage(null);
+                  try {
+                    const success = await clinicalGuardRef.current?.saveAllDirty();
+                    if (success) {
+                      setShowUnsavedModal(false);
+                      const action = pendingNavAction;
+                      setPendingNavAction(null);
+                      if (action) action();
+                    } else {
+                      setGuardErrorMessage(
+                        language === 'ar'
+                          ? 'فشل حفظ التعديلات في قاعدة البيانات. تم إلغاء الانتقال للحفاظ على سلامة البيانات.'
+                          : 'Failed to persist edits to SQLite. Navigation aborted to preserve clinical data.'
+                      );
+                    }
+                  } catch (err: unknown) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    setGuardErrorMessage(msg);
+                  } finally {
+                    setIsGuardSaving(false);
+                  }
+                }}
+                className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs transition-colors flex items-center gap-1.5"
+              >
+                {isGuardSaving ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>{language === 'ar' ? 'جارٍ الحفظ في SQLite...' : 'Saving to SQLite...'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-3.5 h-3.5" />
+                    <span>{language === 'ar' ? 'حفظ ومتابعة' : 'Save & Proceed'}</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
