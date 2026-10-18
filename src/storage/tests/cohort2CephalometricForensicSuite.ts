@@ -29,6 +29,7 @@ import {
   CreateCephStudyParams,
 } from '../drivers/cohort2CephalometricPersistenceService.ts';
 import { P0_PRODUCTION_SQLITE_DDL } from '../../domain/p0SqliteSchema.ts';
+import { computeDatasetFingerprint } from '../../components/media/WebCephImportModal.tsx';
 
 export interface P3KTestResult {
   testId: string;
@@ -580,9 +581,10 @@ export async function runCohort2CephalometricForensicSuite(
     }
 
     // ------------------------------------------------------------------------
-    // P3K-14: WebCeph Numerical Cephalometric Persistence & Fresh Handle Readback (P0-A)
+    // P3K-14: True Same-Database Adapter Close/Reopen Readback Verification (P0-A)
     // ------------------------------------------------------------------------
     try {
+      // 1. Save WebCeph imported measurements ONCE into database adapter
       const p14StudyRes = await cephService.saveOrUpdateStudy({
         caseId: caseRes1.case.id,
         studyStage: 'T1',
@@ -596,123 +598,144 @@ export async function runCohort2CephalometricForensicSuite(
         ],
         userId: 'usr-dr-albasmi',
         deviceId: 'dev-forensic-test',
-        operationId: 'op-p3k-webceph-001',
+        operationId: 'op-p3k-webceph-single-save-001',
       });
 
-      // Close current adapter and open fresh adapter to verify durable physical SQLite persistence
-      const freshAdapter = await createInitializedAdapter('test_p3k_fresh_handle_db');
-      const freshCaseService = new Cohort2CasePersistenceService(freshAdapter);
-      const freshPatientService = new Cohort2PatientPersistenceService(freshAdapter);
-      const freshCephService = new Cohort2CephalometricPersistenceService(freshAdapter);
+      // 2. Close the actual active database adapter handle
+      await adapter.close();
 
-      // Re-persist on fresh adapter
-      const freshCaseRes = await freshCaseService.getCaseById(caseRes1.case.id);
-      if (!freshCaseRes) {
-        // Populate parent case in fresh db
-        await freshPatientService.createPatient({
-          id: patRes.patient.id,
-          firstName: 'Fatimah',
-          lastName: 'Al-Sayed',
-          sex: 'FEMALE',
-          dateOfBirth: '2010-05-12',
-          phone: '+966500000000',
-          userId: 'usr-dr-albasmi',
-          deviceId: 'dev-forensic-test',
-        });
-        await freshCaseService.createCase({
-          id: caseRes1.case.id,
-          caseNumber: 'CAS-P3K-001',
-          patientId: patRes.patient.id,
-          caseType: 'COMPREHENSIVE',
-          caseStatus: 'ACTIVE_TREATMENT',
-          chiefComplaint: 'Initial orthodontic consultation',
-          userId: 'usr-dr-albasmi',
-          deviceId: 'dev-forensic-test',
-        });
-      }
+      // 3. Reopen the SAME persistent database storage location
+      await adapter.initialize();
 
-      await freshCephService.saveOrUpdateStudy({
-        id: p14StudyRes.study.id,
-        caseId: caseRes1.case.id,
-        studyStage: 'T1',
-        studyDate: '2026-03-15',
-        landmarkReviewStatus: 'DOCTOR_APPROVED',
-        measurements: [
-          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'SNA', value: 83.5, unit: '°' },
-          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'SNB', value: 79.5, unit: '°' },
-          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'ANB', value: 4.0, unit: '°' },
-          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'FMA', value: 25.0, unit: '°' },
-        ],
-        userId: 'usr-dr-albasmi',
-        deviceId: 'dev-forensic-test',
-        operationId: 'op-p3k-webceph-fresh-001',
-      });
+      // 4. Create fresh service handle attached to reopened database handle
+      const freshCephService = new Cohort2CephalometricPersistenceService(adapter);
 
+      // 5. Read back original study & measurement rows WITHOUT re-saving or re-creating them
       const readbackStudies = await freshCephService.listStudiesByCaseId(caseRes1.case.id);
       const t1Study = readbackStudies.find((s) => s.study_stage === 'T1');
-      const t1Meas = t1Study ? await freshCephService.listMeasurementsByStudyId(t1Study.id) : [];
+      if (!t1Study) {
+        throw new Error('FRESH_HANDLE_REOPEN_FAILED: Cephalometric study row was lost across same-database handle reopen.');
+      }
+
+      const t1Meas = await freshCephService.listMeasurementsByStudyId(t1Study.id);
+      if (t1Meas.length === 0) {
+        throw new Error('FRESH_HANDLE_REOPEN_FAILED: Cephalometric measurement rows were lost across same-database handle reopen.');
+      }
 
       const snaVal = t1Meas.find((m) => m.measurement_code === 'SNA')?.value;
       const anbVal = t1Meas.find((m) => m.measurement_code === 'ANB')?.value;
 
-      const passed = t1Meas.length === 4 && snaVal === 83.5 && anbVal === 4.0;
+      const passed =
+        t1Study.id === p14StudyRes.study.id &&
+        t1Meas.length === 4 &&
+        snaVal === 83.5 &&
+        anbVal === 4.0;
 
       addResult(
         'P3K-14',
-        'WebCeph numerical cephalometric persistence & fresh handle readback (P0-A)',
+        'WebCeph numerical cephalometric persistence & true same-database handle reopen readback (P0-A)',
         passed,
-        `Readback studies: ${readbackStudies.length}, T1 measurements: ${t1Meas.length}, SNA=${snaVal}°, ANB=${anbVal}°`
+        `Readback study ID: ${t1Study.id}, T1 measurements: ${t1Meas.length}, SNA=${snaVal}°, ANB=${anbVal}°`
       );
     } catch (err: unknown) {
-      addResult('P3K-14', 'WebCeph numerical cephalometric persistence', false, String(err));
+      addResult('P3K-14', 'WebCeph numerical cephalometric persistence across same-db reopen', false, String(err));
     }
 
     // ------------------------------------------------------------------------
-    // P3K-15: Dataset Fingerprint & Approval Invalidation Verification (P0-B)
+    // P3K-15: Production Approval Fingerprint & Byte-Level Content Invalidation (P0-B)
     // ------------------------------------------------------------------------
     try {
-      const computeFp = (
-        stage: string,
-        date: string,
-        reviewer: string,
-        raw: { fileName: string; fileSize: number } | null,
-        trace: { fileName: string; fileSize: number } | null,
-        pdf: { fileName: string; fileSize: number } | null,
-        meas: Record<string, number>
-      ) => {
-        const cleanKeys = Object.keys(meas)
-          .filter((k) => typeof meas[k] === 'number' && !isNaN(meas[k]) && isFinite(meas[k]))
-          .sort();
-        const measStr = cleanKeys.map((k) => `${k}:${meas[k]}`).join('|');
-        return [
-          stage,
-          date,
-          reviewer.trim().toLowerCase(),
-          raw ? `${raw.fileName}:${raw.fileSize}` : 'none',
-          trace ? `${trace.fileName}:${trace.fileSize}` : 'none',
-          pdf ? `${pdf.fileName}:${pdf.fileSize}` : 'none',
-          measStr,
-        ].join(':::');
+      const baseRawAsset = {
+        fileName: 'ceph_lateral.jpg',
+        fileSize: 102450,
+        dataUrl: 'data:image/jpeg;base64,AAA_RAW_CEPH_BYTE_STREAM_ORIGINAL_VERSION_111',
       };
 
-      const baseFp = computeFp('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', { fileName: 'raw.jpg', fileSize: 1024 }, null, null, { SNA: 82.0, SNB: 78.5 });
-      const sameFp = computeFp('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', { fileName: 'raw.jpg', fileSize: 1024 }, null, null, { SNA: 82.0, SNB: 78.5 });
-      const mutatedMeasFp = computeFp('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', { fileName: 'raw.jpg', fileSize: 1024 }, null, null, { SNA: 84.0, SNB: 78.5 });
-      const mutatedStageFp = computeFp('T1_Progress', '2026-03-01', 'Dr. Al-Basmi', { fileName: 'raw.jpg', fileSize: 1024 }, null, null, { SNA: 82.0, SNB: 78.5 });
+      const baseFp = computeDatasetFingerprint(
+        'T0_Initial',
+        '2026-03-01',
+        'Dr. Al-Basmi',
+        baseRawAsset,
+        null,
+        null,
+        { SNA: 82.0, SNB: 78.5 }
+      );
+
+      // 1. Exact identical dataset (must match)
+      const sameFp = computeDatasetFingerprint(
+        'T0_Initial',
+        '2026-03-01',
+        'Dr. Al-Basmi',
+        { ...baseRawAsset },
+        null,
+        null,
+        { SNA: 82.0, SNB: 78.5 }
+      );
+
+      // 2. Same filename & filesize, BUT CHANGED FILE CONTENT BYTES (dataUrl) (must invalidate approval)
+      const changedFileContentAsset = {
+        fileName: 'ceph_lateral.jpg',
+        fileSize: 102450, // Identical filename and size
+        dataUrl: 'data:image/jpeg;base64,BBB_MUTATED_CEPH_BYTE_STREAM_NEW_IMAGE_BYTES_222', // Modified content
+      };
+      const changedFileBytesFp = computeDatasetFingerprint(
+        'T0_Initial',
+        '2026-03-01',
+        'Dr. Al-Basmi',
+        changedFileContentAsset,
+        null,
+        null,
+        { SNA: 82.0, SNB: 78.5 }
+      );
+
+      // 3. Mutated stage (must invalidate approval)
+      const mutatedStageFp = computeDatasetFingerprint(
+        'T1_Progress',
+        '2026-03-01',
+        'Dr. Al-Basmi',
+        baseRawAsset,
+        null,
+        null,
+        { SNA: 82.0, SNB: 78.5 }
+      );
+
+      // 4. Mutated measurements (must invalidate approval)
+      const mutatedMeasFp = computeDatasetFingerprint(
+        'T0_Initial',
+        '2026-03-01',
+        'Dr. Al-Basmi',
+        baseRawAsset,
+        null,
+        null,
+        { SNA: 84.5, SNB: 78.5 }
+      );
+
+      // 5. Mutated reviewer / date (must invalidate approval)
+      const mutatedReviewerFp = computeDatasetFingerprint(
+        'T0_Initial',
+        '2026-03-01',
+        'Dr. Smith',
+        baseRawAsset,
+        null,
+        null,
+        { SNA: 82.0, SNB: 78.5 }
+      );
 
       const passed =
         baseFp === sameFp &&
+        baseFp !== changedFileBytesFp &&
+        baseFp !== mutatedStageFp &&
         baseFp !== mutatedMeasFp &&
-        baseFp !== mutatedStageFp;
+        baseFp !== mutatedReviewerFp;
 
       addResult(
         'P3K-15',
-        'Dataset fingerprint calculation & approval invalidation verification (P0-B)',
+        'Production approval fingerprint calculation & byte-level asset content invalidation (P0-B)',
         passed,
-        `Identical datasets match: ${baseFp === sameFp}, Mutated measurement rejected: ${baseFp !== mutatedMeasFp}, Mutated stage rejected: ${baseFp !== mutatedStageFp}`
+        `Identical datasets match: ${baseFp === sameFp}, Changed file bytes rejected: ${baseFp !== changedFileBytesFp}, Mutated stage rejected: ${baseFp !== mutatedStageFp}, Mutated measurements rejected: ${baseFp !== mutatedMeasFp}`
       );
     } catch (err: unknown) {
-      addResult('P3K-15', 'Dataset fingerprint invalidation', false, String(err));
+      addResult('P3K-15', 'Production approval fingerprint invalidation', false, String(err));
     }
 
     // ------------------------------------------------------------------------

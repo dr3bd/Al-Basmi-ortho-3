@@ -58,6 +58,56 @@ export interface WebCephImportModalProps {
   onCommitImport: (result: WebCephImportResult) => void;
 }
 
+/**
+ * Fast, deterministic FNV-1a 32-bit hash for string content (e.g. dataUrls).
+ * Avoids external crypto dependencies while guaranteeing byte-level content change detection.
+ */
+export function computeContentDigest(str: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+export interface AssetFingerprintInput {
+  fileName: string;
+  fileSize: number;
+  dataUrl?: string;
+}
+
+export function computeDatasetFingerprint(
+  stage: TimepointStage,
+  date: string,
+  reviewer: string,
+  raw: AssetFingerprintInput | null,
+  trace: AssetFingerprintInput | null,
+  pdf: AssetFingerprintInput | null,
+  meas: Record<string, number>
+): string {
+  const cleanKeys = Object.keys(meas)
+    .filter((k) => typeof meas[k] === 'number' && !isNaN(meas[k]) && isFinite(meas[k]))
+    .sort();
+  const measStr = cleanKeys.map((k) => `${k}:${meas[k]}`).join('|');
+
+  const formatAsset = (a: AssetFingerprintInput | null) => {
+    if (!a) return 'none';
+    const digest = a.dataUrl ? computeContentDigest(a.dataUrl) : 'nodata';
+    return `${a.fileName}:${a.fileSize}:${digest}`;
+  };
+
+  return [
+    stage,
+    date,
+    reviewer.trim().toLowerCase(),
+    formatAsset(raw),
+    formatAsset(trace),
+    formatAsset(pdf),
+    measStr,
+  ].join(':::');
+}
+
 export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
   isOpen,
   onClose,
@@ -117,34 +167,6 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
   // Raw text import box
   const [rawTextImport, setRawTextImport] = React.useState<string>('');
   const [parseMessage, setParseMessage] = React.useState<string | null>(null);
-
-  // P0-B: Deterministic Dataset Fingerprint Calculation
-  const computeDatasetFingerprint = React.useCallback(
-    (
-      stage: TimepointStage,
-      date: string,
-      reviewer: string,
-      raw: typeof rawRadiograph,
-      trace: typeof tracingImage,
-      pdf: typeof pdfReport,
-      meas: Record<string, number>
-    ): string => {
-      const cleanKeys = Object.keys(meas)
-        .filter((k) => typeof meas[k] === 'number' && !isNaN(meas[k]) && isFinite(meas[k]))
-        .sort();
-      const measStr = cleanKeys.map((k) => `${k}:${meas[k]}`).join('|');
-      return [
-        stage,
-        date,
-        reviewer.trim().toLowerCase(),
-        raw ? `${raw.fileName}:${raw.fileSize}` : 'none',
-        trace ? `${trace.fileName}:${trace.fileSize}` : 'none',
-        pdf ? `${pdf.fileName}:${pdf.fileSize}` : 'none',
-        measStr,
-      ].join(':::');
-    },
-    []
-  );
 
   // P0-B: Helper to invalidate approval whenever dataset is modified
   const invalidateApproval = React.useCallback(() => {
