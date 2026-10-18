@@ -56,6 +56,8 @@ import {
 import {
   ORTHODONTIC_EVIDENCE_LIBRARY,
   runClinicalConsistencyAndQualityChecks,
+  CEPHALOMETRIC_DEFINITIONS,
+  evaluateCephalometricValue,
 } from './domain/cephalometricEngine';
 import {
   formatCaseStatus,
@@ -72,7 +74,10 @@ import { PatientDetailView } from './components/patient/PatientDetailView';
 import { NewPatientModal } from './components/patient/NewPatientModal';
 import { useClinicalStorage } from './storage/context/ClinicalStorageContext.tsx';
 import { IBrowserMediaBlobStore } from './storage/drivers/browserMediaBlobStore.ts';
-import { studyStageToTimepointStage } from './storage/drivers/cohort2CephalometricPersistenceService.ts';
+import {
+  studyStageToTimepointStage,
+  timepointStageToStudyStage,
+} from './storage/drivers/cohort2CephalometricPersistenceService.ts';
 import { CephStageRecord } from './types/orthodontics.ts';
 import {
   SqlitePatientRow,
@@ -1275,6 +1280,73 @@ export default function App() {
             const verifiedMedia = await cohort2MediaService.getMediaAssetById(res.mediaAsset.id);
             if (!verifiedMedia) {
               throw new Error(`Post-write verification failed: MediaAsset ${res.mediaAsset.id} not found in SQLite.`);
+            }
+          }
+        }
+
+        // 0D. Detect and persist updated Cephalometric Studies & Measurements (P0-A)
+        if (cohort2CephService && updated.cephRecords && updated.cephRecords.length > 0) {
+          const baseCephRecords = baseCase.cephRecords || [];
+          const updatedCephRecords = updated.cephRecords || [];
+
+          for (const rec of updatedCephRecords) {
+            const baseRec = baseCephRecords.find((r) => r.stage === rec.stage);
+            const recChanged =
+              !baseRec ||
+              JSON.stringify(baseRec.values) !== JSON.stringify(rec.values) ||
+              JSON.stringify(baseRec.landmarks) !== JSON.stringify(rec.landmarks) ||
+              baseRec.doctorVerified !== rec.doctorVerified;
+
+            if (recChanged) {
+              const studyStage = timepointStageToStudyStage(rec.stage);
+
+              const measurementsParam = Object.entries(rec.values || {}).map(([code, val]) => {
+                const def = CEPHALOMETRIC_DEFINITIONS.find((d) => d.code === code);
+                const evalResult = def ? evaluateCephalometricValue(def, val) : null;
+                return {
+                  analysisCode: 'WEBCEPH_DEFAULT',
+                  measurementCode: code,
+                  value: val,
+                  unit: def?.unit || '°',
+                  referenceValue: def?.normMean ?? null,
+                  normalRange: def ? `${def.normMean - def.normSd} - ${def.normMean + def.normSd}` : null,
+                  interpretation: evalResult ? evalResult.status : null,
+                };
+              });
+
+              const landmarksParam = (rec.landmarks || []).map((lm) => ({
+                landmarkCode: lm.code,
+                x: lm.x,
+                y: lm.y,
+                confidence: lm.confidence ?? 1.0,
+                source: 'MANUAL' as const,
+                reviewStatus: lm.doctorVerified || rec.doctorVerified ? 'APPROVED' : 'PENDING',
+              }));
+
+              const cephRes = await cohort2CephService.saveOrUpdateStudy({
+                caseId: updated.id,
+                studyStage,
+                studyDate: rec.date || nowIso.slice(0, 10),
+                landmarkReviewStatus: rec.doctorVerified ? 'DOCTOR_APPROVED' : 'PENDING_REVIEW',
+                measurements: measurementsParam,
+                landmarks: landmarksParam,
+                userId: 'usr-dr-albasmi',
+                userRole: 'ORTHODONTIST',
+                deviceId,
+                timestamp: nowIso,
+              });
+
+              // Post-write verification gate
+              const verifiedStudies = await cohort2CephService.listStudiesByCaseId(updated.id);
+              const studyMatch = verifiedStudies.find((s) => s.id === cephRes.study.id || s.study_stage === studyStage);
+              if (!studyMatch) {
+                throw new Error(`Post-write verification failed: Cephalometric study stage ${studyStage} not found in SQLite after write.`);
+              }
+
+              const verifiedMeas = await cohort2CephService.listMeasurementsByStudyId(studyMatch.id);
+              if (Object.keys(rec.values || {}).length > 0 && verifiedMeas.length === 0) {
+                throw new Error(`Post-write verification failed: Cephalometric measurements for stage ${studyStage} not found in SQLite after write.`);
+              }
             }
           }
         }

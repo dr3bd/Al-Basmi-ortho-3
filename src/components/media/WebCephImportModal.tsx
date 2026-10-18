@@ -77,6 +77,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
     isAr ? 'د. البصمي (استشاري تقويم الأسنان)' : 'Dr. Al-Basmi (Orthodontic Specialist)'
   );
   const [isDoctorApproved, setIsDoctorApproved] = React.useState<boolean>(false);
+  const [approvedFingerprint, setApprovedFingerprint] = React.useState<string | null>(null);
   const [activeTab, setActiveTab] = React.useState<'assets' | 'measurements' | 'parse'>('assets');
 
   // Asset states
@@ -117,7 +118,66 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
   const [rawTextImport, setRawTextImport] = React.useState<string>('');
   const [parseMessage, setParseMessage] = React.useState<string | null>(null);
 
-  // FIX B: Strict stage isolation on stage change
+  // P0-B: Deterministic Dataset Fingerprint Calculation
+  const computeDatasetFingerprint = React.useCallback(
+    (
+      stage: TimepointStage,
+      date: string,
+      reviewer: string,
+      raw: typeof rawRadiograph,
+      trace: typeof tracingImage,
+      pdf: typeof pdfReport,
+      meas: Record<string, number>
+    ): string => {
+      const cleanKeys = Object.keys(meas)
+        .filter((k) => typeof meas[k] === 'number' && !isNaN(meas[k]) && isFinite(meas[k]))
+        .sort();
+      const measStr = cleanKeys.map((k) => `${k}:${meas[k]}`).join('|');
+      return [
+        stage,
+        date,
+        reviewer.trim().toLowerCase(),
+        raw ? `${raw.fileName}:${raw.fileSize}` : 'none',
+        trace ? `${trace.fileName}:${trace.fileSize}` : 'none',
+        pdf ? `${pdf.fileName}:${pdf.fileSize}` : 'none',
+        measStr,
+      ].join(':::');
+    },
+    []
+  );
+
+  // P0-B: Helper to invalidate approval whenever dataset is modified
+  const invalidateApproval = React.useCallback(() => {
+    setIsDoctorApproved(false);
+    setApprovedFingerprint(null);
+  }, []);
+
+  // P0-B: Doctor approval checkbox handler (calculates & locks fingerprint upon sign-off)
+  const handleToggleApproval = (checked: boolean) => {
+    if (checked) {
+      const cleanMeas: Record<string, number> = {};
+      Object.entries(measurements).forEach(([code, val]) => {
+        if (typeof val === 'number' && !isNaN(val) && isFinite(val)) {
+          cleanMeas[code] = val;
+        }
+      });
+      const fp = computeDatasetFingerprint(
+        targetStage,
+        acquisitionDate,
+        doctorReviewer,
+        rawRadiograph,
+        tracingImage,
+        pdfReport,
+        cleanMeas
+      );
+      setIsDoctorApproved(true);
+      setApprovedFingerprint(fp);
+    } else {
+      invalidateApproval();
+    }
+  };
+
+  // FIX B & P0-B: Strict stage isolation & approval invalidation on stage change
   const handleStageChange = (newStage: TimepointStage) => {
     setTargetStage(newStage);
     const rec = orthoCase.cephRecords.find((r) => r.stage === newStage);
@@ -129,9 +189,9 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
         }
       });
     }
-    // Setting stageValues ensures no uncommitted parsed values leak between stages
     setMeasurements(stageValues);
     setParseMessage(null);
+    invalidateApproval();
   };
 
   // Generic File Reader helper
@@ -154,6 +214,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
         dataUrl,
         fileSize: file.size,
       });
+      invalidateApproval();
     } catch (err) {
       console.error('Failed to read radiograph file', err);
     }
@@ -169,6 +230,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
         dataUrl,
         fileSize: file.size,
       });
+      invalidateApproval();
     } catch (err) {
       console.error('Failed to read tracing image file', err);
     }
@@ -184,6 +246,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
         dataUrl,
         fileSize: file.size,
       });
+      invalidateApproval();
     } catch (err) {
       console.error('Failed to read PDF report file', err);
     }
@@ -243,6 +306,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
     });
 
     setMeasurements(updated);
+    invalidateApproval();
     if (extractedCount > 0) {
       setParseMessage(
         isAr
@@ -260,6 +324,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
   };
 
   const handleMeasurementInputChange = (code: string, valueStr: string) => {
+    invalidateApproval();
     if (valueStr.trim() === '') {
       setMeasurements((prev) => {
         const next = { ...prev };
@@ -286,6 +351,23 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
         cleanMeasurements[code] = val;
       }
     });
+
+    const currentFp = computeDatasetFingerprint(
+      targetStage,
+      acquisitionDate,
+      doctorReviewer,
+      rawRadiograph,
+      tracingImage,
+      pdfReport,
+      cleanMeasurements
+    );
+
+    // P0-B: Strict Fingerprint Verification Gate
+    if (!approvedFingerprint || approvedFingerprint !== currentFp) {
+      console.warn('Commit blocked: Dataset fingerprint does not match approved sign-off state.');
+      invalidateApproval();
+      return;
+    }
 
     onCommitImport({
       stage: targetStage,
@@ -380,7 +462,10 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
             <input
               type="date"
               value={acquisitionDate}
-              onChange={(e) => setAcquisitionDate(e.target.value)}
+              onChange={(e) => {
+                setAcquisitionDate(e.target.value);
+                invalidateApproval();
+              }}
               className="px-2.5 py-1 text-xs border border-slate-300 rounded bg-white font-mono text-slate-800"
             />
           </div>
@@ -774,7 +859,10 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
                 <input
                   type="text"
                   value={doctorReviewer}
-                  onChange={(e) => setDoctorReviewer(e.target.value)}
+                  onChange={(e) => {
+                    setDoctorReviewer(e.target.value);
+                    invalidateApproval();
+                  }}
                   placeholder={isAr ? 'اسم الطبيب المراجع' : 'Doctor name'}
                   className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded bg-white text-slate-900 font-medium focus:outline-blue-600"
                 />
@@ -785,7 +873,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
                   <input
                     type="checkbox"
                     checked={isDoctorApproved}
-                    onChange={(e) => setIsDoctorApproved(e.target.checked)}
+                    onChange={(e) => handleToggleApproval(e.target.checked)}
                     className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
                   />
                   <span className="text-xs font-bold text-slate-900">

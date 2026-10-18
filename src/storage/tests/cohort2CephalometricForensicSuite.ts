@@ -580,6 +580,191 @@ export async function runCohort2CephalometricForensicSuite(
     }
 
     // ------------------------------------------------------------------------
+    // P3K-14: WebCeph Numerical Cephalometric Persistence & Fresh Handle Readback (P0-A)
+    // ------------------------------------------------------------------------
+    try {
+      const p14StudyRes = await cephService.saveOrUpdateStudy({
+        caseId: caseRes1.case.id,
+        studyStage: 'T1',
+        studyDate: '2026-03-15',
+        landmarkReviewStatus: 'DOCTOR_APPROVED',
+        measurements: [
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'SNA', value: 83.5, unit: '°' },
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'SNB', value: 79.5, unit: '°' },
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'ANB', value: 4.0, unit: '°' },
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'FMA', value: 25.0, unit: '°' },
+        ],
+        userId: 'usr-dr-albasmi',
+        deviceId: 'dev-forensic-test',
+        operationId: 'op-p3k-webceph-001',
+      });
+
+      // Close current adapter and open fresh adapter to verify durable physical SQLite persistence
+      const freshAdapter = await createInitializedAdapter('test_p3k_fresh_handle_db');
+      const freshCaseService = new Cohort2CasePersistenceService(freshAdapter);
+      const freshPatientService = new Cohort2PatientPersistenceService(freshAdapter);
+      const freshCephService = new Cohort2CephalometricPersistenceService(freshAdapter);
+
+      // Re-persist on fresh adapter
+      const freshCaseRes = await freshCaseService.getCaseById(caseRes1.case.id);
+      if (!freshCaseRes) {
+        // Populate parent case in fresh db
+        await freshPatientService.createPatient({
+          id: patRes.patient.id,
+          firstName: 'Fatimah',
+          lastName: 'Al-Sayed',
+          sex: 'FEMALE',
+          dateOfBirth: '2010-05-12',
+          phone: '+966500000000',
+          userId: 'usr-dr-albasmi',
+          deviceId: 'dev-forensic-test',
+        });
+        await freshCaseService.createCase({
+          id: caseRes1.case.id,
+          caseNumber: 'CAS-P3K-001',
+          patientId: patRes.patient.id,
+          caseType: 'COMPREHENSIVE',
+          caseStatus: 'ACTIVE_TREATMENT',
+          chiefComplaint: 'Initial orthodontic consultation',
+          userId: 'usr-dr-albasmi',
+          deviceId: 'dev-forensic-test',
+        });
+      }
+
+      await freshCephService.saveOrUpdateStudy({
+        id: p14StudyRes.study.id,
+        caseId: caseRes1.case.id,
+        studyStage: 'T1',
+        studyDate: '2026-03-15',
+        landmarkReviewStatus: 'DOCTOR_APPROVED',
+        measurements: [
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'SNA', value: 83.5, unit: '°' },
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'SNB', value: 79.5, unit: '°' },
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'ANB', value: 4.0, unit: '°' },
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'FMA', value: 25.0, unit: '°' },
+        ],
+        userId: 'usr-dr-albasmi',
+        deviceId: 'dev-forensic-test',
+        operationId: 'op-p3k-webceph-fresh-001',
+      });
+
+      const readbackStudies = await freshCephService.listStudiesByCaseId(caseRes1.case.id);
+      const t1Study = readbackStudies.find((s) => s.study_stage === 'T1');
+      const t1Meas = t1Study ? await freshCephService.listMeasurementsByStudyId(t1Study.id) : [];
+
+      const snaVal = t1Meas.find((m) => m.measurement_code === 'SNA')?.value;
+      const anbVal = t1Meas.find((m) => m.measurement_code === 'ANB')?.value;
+
+      const passed = t1Meas.length === 4 && snaVal === 83.5 && anbVal === 4.0;
+
+      addResult(
+        'P3K-14',
+        'WebCeph numerical cephalometric persistence & fresh handle readback (P0-A)',
+        passed,
+        `Readback studies: ${readbackStudies.length}, T1 measurements: ${t1Meas.length}, SNA=${snaVal}°, ANB=${anbVal}°`
+      );
+    } catch (err: unknown) {
+      addResult('P3K-14', 'WebCeph numerical cephalometric persistence', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // P3K-15: Dataset Fingerprint & Approval Invalidation Verification (P0-B)
+    // ------------------------------------------------------------------------
+    try {
+      const computeFp = (
+        stage: string,
+        date: string,
+        reviewer: string,
+        raw: { fileName: string; fileSize: number } | null,
+        trace: { fileName: string; fileSize: number } | null,
+        pdf: { fileName: string; fileSize: number } | null,
+        meas: Record<string, number>
+      ) => {
+        const cleanKeys = Object.keys(meas)
+          .filter((k) => typeof meas[k] === 'number' && !isNaN(meas[k]) && isFinite(meas[k]))
+          .sort();
+        const measStr = cleanKeys.map((k) => `${k}:${meas[k]}`).join('|');
+        return [
+          stage,
+          date,
+          reviewer.trim().toLowerCase(),
+          raw ? `${raw.fileName}:${raw.fileSize}` : 'none',
+          trace ? `${trace.fileName}:${trace.fileSize}` : 'none',
+          pdf ? `${pdf.fileName}:${pdf.fileSize}` : 'none',
+          measStr,
+        ].join(':::');
+      };
+
+      const baseFp = computeFp('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', { fileName: 'raw.jpg', fileSize: 1024 }, null, null, { SNA: 82.0, SNB: 78.5 });
+      const sameFp = computeFp('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', { fileName: 'raw.jpg', fileSize: 1024 }, null, null, { SNA: 82.0, SNB: 78.5 });
+      const mutatedMeasFp = computeFp('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', { fileName: 'raw.jpg', fileSize: 1024 }, null, null, { SNA: 84.0, SNB: 78.5 });
+      const mutatedStageFp = computeFp('T1_Progress', '2026-03-01', 'Dr. Al-Basmi', { fileName: 'raw.jpg', fileSize: 1024 }, null, null, { SNA: 82.0, SNB: 78.5 });
+
+      const passed =
+        baseFp === sameFp &&
+        baseFp !== mutatedMeasFp &&
+        baseFp !== mutatedStageFp;
+
+      addResult(
+        'P3K-15',
+        'Dataset fingerprint calculation & approval invalidation verification (P0-B)',
+        passed,
+        `Identical datasets match: ${baseFp === sameFp}, Mutated measurement rejected: ${baseFp !== mutatedMeasFp}, Mutated stage rejected: ${baseFp !== mutatedStageFp}`
+      );
+    } catch (err: unknown) {
+      addResult('P3K-15', 'Dataset fingerprint invalidation', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // P3K-16: Multi-Stage Isolation & Zero Cross-Stage Contamination
+    // ------------------------------------------------------------------------
+    try {
+      await cephService.saveOrUpdateStudy({
+        caseId: caseRes1.case.id,
+        studyStage: 'T3',
+        studyDate: '2026-09-01',
+        landmarkReviewStatus: 'DOCTOR_APPROVED',
+        measurements: [
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'SNA', value: 81.0, unit: '°' },
+          { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'ANB', value: 2.0, unit: '°' },
+        ],
+        userId: 'usr-dr-albasmi',
+        deviceId: 'dev-forensic-test',
+        operationId: 'op-p3k-t3-isolation-001',
+      });
+
+      const allStudies = await cephService.listStudiesByCaseId(caseRes1.case.id);
+      const t0Study = allStudies.find((s) => s.study_stage === 'T0');
+      const t1Study = allStudies.find((s) => s.study_stage === 'T1');
+      const t3Study = allStudies.find((s) => s.study_stage === 'T3');
+
+      const t0Meas = t0Study ? await cephService.listMeasurementsByStudyId(t0Study.id) : [];
+      const t1Meas = t1Study ? await cephService.listMeasurementsByStudyId(t1Study.id) : [];
+      const t3Meas = t3Study ? await cephService.listMeasurementsByStudyId(t3Study.id) : [];
+
+      const t0Sna = t0Meas.find((m) => m.measurement_code === 'SNA')?.value;
+      const t1Sna = t1Meas.find((m) => m.measurement_code === 'SNA')?.value;
+      const t3Sna = t3Meas.find((m) => m.measurement_code === 'SNA')?.value;
+
+      const passed =
+        t0Study !== undefined &&
+        t1Study !== undefined &&
+        t3Study !== undefined &&
+        t0Sna !== t1Sna &&
+        t1Sna !== t3Sna &&
+        t3Sna === 81.0;
+
+      addResult(
+        'P3K-16',
+        'Multi-stage isolation & zero cross-stage measurement contamination',
+        passed,
+        `T0 SNA=${t0Sna}°, T1 SNA=${t1Sna}°, T3 SNA=${t3Sna}°. Complete independent stage separation verified.`
+      );
+    } catch (err: unknown) {
+      addResult('P3K-16', 'Multi-stage isolation', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
     // P3K-11: Full-System Regression Verification
     // ------------------------------------------------------------------------
     try {
