@@ -59,41 +59,91 @@ export interface WebCephImportModalProps {
 }
 
 /**
- * Asynchronous, deterministic SHA-256 digest for string content (e.g. dataUrls).
- * Uses Web Crypto API (crypto.subtle.digest) with Node.js crypto fallback.
+ * Strict SHA-256 digest calculation over raw binary asset bytes.
+ * Throws explicit Error if payload is invalid, malformed, unsupported, or undecodable.
  */
-export async function computeContentDigest(str: string): Promise<string> {
-  if (!str) return '0000000000000000000000000000000000000000000000000000000000000000';
+export async function computeBinaryContentDigest(dataUrl: string): Promise<string> {
+  if (!dataUrl || typeof dataUrl !== 'string') {
+    throw new Error('ERR_INVALID_ASSET_DATA: Asset dataUrl is missing or null.');
+  }
 
-  // 1. Web Crypto API (Browser & modern Node)
+  // 1. Format & MIME Whitelist Validation
+  const match = dataUrl.match(/^data:([a-zA-Z0-9\/+-.]+);base64,(.+)$/s);
+  if (!match) {
+    throw new Error('ERR_MALFORMED_DATA_URL: Asset is not a valid Base64 Data URL.');
+  }
+
+  const mimeType = match[1].toLowerCase();
+  const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf'];
+  if (!allowedMimeTypes.includes(mimeType)) {
+    throw new Error(`ERR_UNSUPPORTED_MIME_TYPE: Unsupported clinical asset MIME type: ${mimeType}`);
+  }
+
+  const base64Payload = match[2].replace(/\s+/g, '');
+
+  // 2. Length & Padding Position Validation
+  if (base64Payload.length === 0 || base64Payload.length % 4 !== 0) {
+    throw new Error('ERR_MALFORMED_BASE64_PADDING: Base64 payload length is invalid or improperly padded.');
+  }
+
+  // Strict Alphabet & Padding Syntax (only = or == at the end)
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(base64Payload)) {
+    throw new Error('ERR_MALFORMED_BASE64_SYNTAX: Base64 payload contains invalid characters or bad padding position.');
+  }
+
+  // 3. Canonical Trailing Bits Validation
+  if (base64Payload.endsWith('==')) {
+    const lastChar = base64Payload.charAt(base64Payload.length - 3);
+    const charIndex = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.indexOf(lastChar);
+    if (charIndex !== -1 && (charIndex & 0x0f) !== 0) {
+      throw new Error('ERR_NON_CANONICAL_BASE64: Non-canonical trailing bits in Base64 double padding.');
+    }
+  } else if (base64Payload.endsWith('=')) {
+    const lastChar = base64Payload.charAt(base64Payload.length - 2);
+    const charIndex = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.indexOf(lastChar);
+    if (charIndex !== -1 && (charIndex & 0x03) !== 0) {
+      throw new Error('ERR_NON_CANONICAL_BASE64: Non-canonical trailing bits in Base64 single padding.');
+    }
+  }
+
+  // 4. Decode to raw Uint8Array binary bytes
+  let bytes: Uint8Array;
+  try {
+    if (typeof atob === 'function') {
+      const binaryStr = atob(base64Payload);
+      bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+    } else {
+      const buf = Buffer.from(base64Payload, 'base64');
+      bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    }
+  } catch (err) {
+    throw new Error(`ERR_BASE64_DECODE_FAILED: Base64 decoding failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (bytes.length === 0) {
+    throw new Error('ERR_ZERO_BYTE_ASSET: Decoded binary asset is 0 bytes.');
+  }
+
+  // 5. SHA-256 Digest Computation over raw binary Uint8Array bytes
   if (typeof globalThis !== 'undefined' && globalThis.crypto?.subtle) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(str);
-    const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', data);
+    const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', bytes.buffer as ArrayBuffer);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
-  // 2. Node.js crypto module fallback
   try {
     const nodeCrypto = await import('node:crypto');
-    return nodeCrypto.createHash('sha256').update(str).digest('hex');
-  } catch {
-    // 3. Fallback deterministic 64-char hex digest
-    let hash1 = 0x811c9dc5;
-    let hash2 = 0x55555555;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash1 ^= char;
-      hash1 += (hash1 << 1) + (hash1 << 4) + (hash1 << 7) + (hash1 << 8) + (hash1 << 24);
-      hash2 ^= char;
-      hash2 = (hash2 << 5) - hash2;
-    }
-    const hex1 = (hash1 >>> 0).toString(16).padStart(8, '0');
-    const hex2 = (hash2 >>> 0).toString(16).padStart(8, '0');
-    return (hex1 + hex2).repeat(4).slice(0, 64);
+    return nodeCrypto.createHash('sha256').update(bytes).digest('hex');
+  } catch (err) {
+    throw new Error(`ERR_SHA256_UNAVAILABLE: No SHA-256 crypto provider available: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
+
+// Backward compatibility alias
+export const computeContentDigest = computeBinaryContentDigest;
 
 export interface AssetFingerprintInput {
   fileName: string;
@@ -117,7 +167,7 @@ export async function computeDatasetFingerprint(
 
   const formatAsset = async (a: AssetFingerprintInput | null) => {
     if (!a) return 'none';
-    const digest = a.dataUrl ? await computeContentDigest(a.dataUrl) : 'nodata';
+    const digest = a.dataUrl ? await computeBinaryContentDigest(a.dataUrl) : 'nodata';
     return `${a.fileName}:${a.fileSize}:${digest}`;
   };
 
@@ -134,6 +184,48 @@ export async function computeDatasetFingerprint(
     pdfFormatted,
     measStr,
   ].join(':::');
+}
+
+export interface ApprovedDatasetSnapshot {
+  stage: TimepointStage;
+  acquisitionDate: string;
+  doctorReviewer: string;
+  rawRadiograph?: { fileName: string; fileSize: number; dataUrl: string; digest: string };
+  tracingImage?: { fileName: string; fileSize: number; dataUrl: string; digest: string };
+  pdfReport?: { fileName: string; fileSize: number; dataUrl: string; digest: string };
+  measurements: Record<string, number>;
+  fingerprint: string;
+}
+
+export function snapshotToWebCephImportResult(s: ApprovedDatasetSnapshot): WebCephImportResult {
+  const cleanMeas: Record<string, number> = {};
+  if (s.measurements) {
+    Object.entries(s.measurements).forEach(([k, v]) => {
+      if (typeof v === 'number' && !isNaN(v) && isFinite(v)) {
+        cleanMeas[k] = v;
+      }
+    });
+  }
+
+  return {
+    stage: s.stage,
+    acquisitionDate: s.acquisitionDate,
+    source: 'WebCeph AI / Doctor Review',
+    doctorReviewer: s.doctorReviewer.trim(),
+    approvalStatus: 'APPROVED',
+    rawRadiograph: s.rawRadiograph
+      ? { fileName: s.rawRadiograph.fileName, fileSize: s.rawRadiograph.fileSize, dataUrl: s.rawRadiograph.dataUrl }
+      : undefined,
+    tracingImage: s.tracingImage
+      ? { fileName: s.tracingImage.fileName, fileSize: s.tracingImage.fileSize, dataUrl: s.tracingImage.dataUrl }
+      : undefined,
+    pdfReport: s.pdfReport
+      ? { fileName: s.pdfReport.fileName, fileSize: s.pdfReport.fileSize, dataUrl: s.pdfReport.dataUrl }
+      : undefined,
+    measurements: Object.keys(cleanMeas).length > 0 ? cleanMeas : undefined,
+    notesEn: `WebCeph cephalometric dataset approved by ${s.doctorReviewer.trim()} on ${s.acquisitionDate}.`,
+    notesAr: `بيانات التحليل السيفالومتري من WebCeph معتمدة بواسطة ${s.doctorReviewer.trim()} بتاريخ ${s.acquisitionDate}.`,
+  };
 }
 
 export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
@@ -156,6 +248,8 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
   );
   const [isDoctorApproved, setIsDoctorApproved] = React.useState<boolean>(false);
   const [approvedFingerprint, setApprovedFingerprint] = React.useState<string | null>(null);
+  const [approvedSnapshot, setApprovedSnapshot] = React.useState<ApprovedDatasetSnapshot | null>(null);
+  const [isComputingFingerprint, setIsComputingFingerprint] = React.useState<boolean>(false);
   const [activeTab, setActiveTab] = React.useState<'assets' | 'measurements' | 'parse'>('assets');
 
   // Asset states
@@ -178,7 +272,6 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
   } | null>(null);
 
   // Cephalometric Measurements State (keyed by parameter code)
-  // FIX A & B: Strictly initialized with ONLY existing stage values (no normative fallback filling)
   const existingStageCeph = orthoCase.cephRecords.find((r) => r.stage === targetStage);
   const [measurements, setMeasurements] = React.useState<Record<string, number>>(() => {
     const initialValues: Record<string, number> = {};
@@ -196,32 +289,60 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
   const [rawTextImport, setRawTextImport] = React.useState<string>('');
   const [parseMessage, setParseMessage] = React.useState<string | null>(null);
 
-  // P0-B: Helper to invalidate approval whenever dataset is modified
+  // Helper to invalidate approval whenever dataset is modified
   const invalidateApproval = React.useCallback(() => {
     setIsDoctorApproved(false);
     setApprovedFingerprint(null);
+    setApprovedSnapshot(null);
   }, []);
 
-  // P0-B: Doctor approval checkbox handler (calculates & locks fingerprint upon sign-off)
+  // Doctor approval checkbox handler (calculates & locks fingerprint + snapshot upon sign-off)
   const handleToggleApproval = async (checked: boolean) => {
     if (checked) {
-      const cleanMeas: Record<string, number> = {};
-      Object.entries(measurements).forEach(([code, val]) => {
-        if (typeof val === 'number' && !isNaN(val) && isFinite(val)) {
-          cleanMeas[code] = val;
-        }
-      });
-      const fp = await computeDatasetFingerprint(
-        targetStage,
-        acquisitionDate,
-        doctorReviewer,
-        rawRadiograph,
-        tracingImage,
-        pdfReport,
-        cleanMeas
-      );
-      setIsDoctorApproved(true);
-      setApprovedFingerprint(fp);
+      setIsComputingFingerprint(true);
+      try {
+        const cleanMeas: Record<string, number> = {};
+        Object.entries(measurements).forEach(([code, val]) => {
+          if (typeof val === 'number' && !isNaN(val) && isFinite(val)) {
+            cleanMeas[code] = val;
+          }
+        });
+
+        const rawDigest = rawRadiograph?.dataUrl ? await computeBinaryContentDigest(rawRadiograph.dataUrl) : '';
+        const traceDigest = tracingImage?.dataUrl ? await computeBinaryContentDigest(tracingImage.dataUrl) : '';
+        const pdfDigest = pdfReport?.dataUrl ? await computeBinaryContentDigest(pdfReport.dataUrl) : '';
+
+        const fp = await computeDatasetFingerprint(
+          targetStage,
+          acquisitionDate,
+          doctorReviewer,
+          rawRadiograph,
+          tracingImage,
+          pdfReport,
+          cleanMeas
+        );
+
+        const snapshot: ApprovedDatasetSnapshot = {
+          stage: targetStage,
+          acquisitionDate,
+          doctorReviewer,
+          rawRadiograph: rawRadiograph ? { ...rawRadiograph, digest: rawDigest } : undefined,
+          tracingImage: tracingImage ? { ...tracingImage, digest: traceDigest } : undefined,
+          pdfReport: pdfReport ? { ...pdfReport, digest: pdfDigest } : undefined,
+          measurements: { ...cleanMeas },
+          fingerprint: fp,
+        };
+
+        setApprovedSnapshot(snapshot);
+        setApprovedFingerprint(fp);
+        setIsDoctorApproved(true);
+      } catch (err) {
+        console.error('Failed to generate approval fingerprint:', err);
+        invalidateApproval();
+        alert(err instanceof Error ? err.message : String(err));
+      } finally {
+        setIsComputingFingerprint(false);
+      }
     } else {
       invalidateApproval();
     }
@@ -393,7 +514,9 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
   };
 
   const handleCommit = async () => {
-    if (!isDoctorApproved || doctorReviewer.trim().length === 0) return;
+    if (!isDoctorApproved || !approvedSnapshot || doctorReviewer.trim().length === 0 || isComputingFingerprint) {
+      return;
+    }
 
     const cleanMeasurements: Record<string, number> = {};
     Object.entries(measurements).forEach(([code, val]) => {
@@ -412,27 +535,20 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
       cleanMeasurements
     );
 
-    // P0-B: Strict Fingerprint Verification Gate
-    if (!approvedFingerprint || approvedFingerprint !== currentFp) {
-      console.warn('Commit blocked: Dataset fingerprint does not match approved sign-off state.');
+    // Strict Fingerprint Verification Gate against approved fingerprint AND snapshot
+    if (
+      !approvedFingerprint ||
+      approvedFingerprint !== currentFp ||
+      approvedSnapshot.fingerprint !== currentFp
+    ) {
+      console.warn('Commit blocked: Current state differs from clinician-approved dataset snapshot.');
       invalidateApproval();
       return;
     }
 
-    onCommitImport({
-      stage: targetStage,
-      acquisitionDate,
-      source: 'WebCeph AI / Doctor Review',
-      doctorReviewer: doctorReviewer.trim(),
-      approvalStatus: 'APPROVED',
-      rawRadiograph: rawRadiograph || undefined,
-      tracingImage: tracingImage || undefined,
-      pdfReport: pdfReport || undefined,
-      measurements: Object.keys(cleanMeasurements).length > 0 ? cleanMeasurements : undefined,
-      notesEn: `WebCeph cephalometric dataset approved by ${doctorReviewer.trim()} on ${acquisitionDate}.`,
-      notesAr: `بيانات التحليل السيفالومتري من WebCeph معتمدة بواسطة ${doctorReviewer.trim()} بتاريخ ${acquisitionDate}.`,
-    });
-
+    // TOCTOU Elimination: Pass IMMUTABLE SNAPSHOT DATASET directly to commit callback
+    const commitResult = snapshotToWebCephImportResult(approvedSnapshot);
+    onCommitImport(commitResult);
     onClose();
   };
 
@@ -440,7 +556,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
 
   const hasAnyAsset = Boolean(rawRadiograph || tracingImage || pdfReport);
   const hasAnyMeasurement = Object.keys(measurements).length > 0;
-  const canCommit = isDoctorApproved && doctorReviewer.trim().length > 0 && (hasAnyAsset || hasAnyMeasurement);
+  const canCommit = isDoctorApproved && !isComputingFingerprint && doctorReviewer.trim().length > 0 && (hasAnyAsset || hasAnyMeasurement);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-3 sm:p-6 backdrop-blur-xs overflow-y-auto">

@@ -29,7 +29,7 @@ import {
   CreateCephStudyParams,
 } from '../drivers/cohort2CephalometricPersistenceService.ts';
 import { P0_PRODUCTION_SQLITE_DDL } from '../../domain/p0SqliteSchema.ts';
-import { computeDatasetFingerprint } from '../../components/media/WebCephImportModal.tsx';
+import { computeBinaryContentDigest, computeDatasetFingerprint } from '../../components/media/WebCephImportModal.tsx';
 
 export interface P3KTestResult {
   testId: string;
@@ -642,100 +642,139 @@ export async function runCohort2CephalometricForensicSuite(
     }
 
     // ------------------------------------------------------------------------
-    // P3K-15: Production Approval Fingerprint & Byte-Level Content Invalidation (P0-B)
+    // P3K-15-DIGEST-01 & 02: Binary Content Digest Invariance & Sensitivity
     // ------------------------------------------------------------------------
     try {
-      const baseRawAsset = {
-        fileName: 'ceph_lateral.jpg',
-        fileSize: 102450,
-        dataUrl: 'data:image/jpeg;base64,AAA_RAW_CEPH_BYTE_STREAM_ORIGINAL_VERSION_111',
-      };
+      const dataUrlA = 'data:image/jpeg;base64,QUFBX1JBV19DRVBIX0JZVEVfU1RSRUFNX09SSUdJTkFMX1ZFUlNJT05fMTEx';
+      const dataUrlB = 'data:image/png;base64,QUFBX1JBV19DRVBIX0JZVEVfU1RSRUFNX09SSUdJTkFMX1ZFUlNJT05fMTEx'; // Same bytes, different MIME header
+      const dataUrlMutated = 'data:image/jpeg;base64,QkJCX01VVEFURURfQ0VQSF9CWVRFX1NUUkVBTV9ORVdfSU1BR0VfQllURVNfMjIy';
 
-      const baseFp = await computeDatasetFingerprint(
-        'T0_Initial',
-        '2026-03-01',
-        'Dr. Al-Basmi',
-        baseRawAsset,
-        null,
-        null,
-        { SNA: 82.0, SNB: 78.5 }
-      );
+      const digestA = await computeBinaryContentDigest(dataUrlA);
+      const digestB = await computeBinaryContentDigest(dataUrlB);
+      const digestMutated = await computeBinaryContentDigest(dataUrlMutated);
 
-      // 1. Exact identical dataset (must match)
-      const sameFp = await computeDatasetFingerprint(
-        'T0_Initial',
-        '2026-03-01',
-        'Dr. Al-Basmi',
-        { ...baseRawAsset },
-        null,
-        null,
-        { SNA: 82.0, SNB: 78.5 }
-      );
-
-      // 2. Same filename & filesize, BUT CHANGED FILE CONTENT BYTES (dataUrl) (must invalidate approval)
-      const changedFileContentAsset = {
-        fileName: 'ceph_lateral.jpg',
-        fileSize: 102450, // Identical filename and size
-        dataUrl: 'data:image/jpeg;base64,BBB_MUTATED_CEPH_BYTE_STREAM_NEW_IMAGE_BYTES_222', // Modified content
-      };
-      const changedFileBytesFp = await computeDatasetFingerprint(
-        'T0_Initial',
-        '2026-03-01',
-        'Dr. Al-Basmi',
-        changedFileContentAsset,
-        null,
-        null,
-        { SNA: 82.0, SNB: 78.5 }
-      );
-
-      // 3. Mutated stage (must invalidate approval)
-      const mutatedStageFp = await computeDatasetFingerprint(
-        'T1_Progress',
-        '2026-03-01',
-        'Dr. Al-Basmi',
-        baseRawAsset,
-        null,
-        null,
-        { SNA: 82.0, SNB: 78.5 }
-      );
-
-      // 4. Mutated measurements (must invalidate approval)
-      const mutatedMeasFp = await computeDatasetFingerprint(
-        'T0_Initial',
-        '2026-03-01',
-        'Dr. Al-Basmi',
-        baseRawAsset,
-        null,
-        null,
-        { SNA: 84.5, SNB: 78.5 }
-      );
-
-      // 5. Mutated reviewer / date (must invalidate approval)
-      const mutatedReviewerFp = await computeDatasetFingerprint(
-        'T0_Initial',
-        '2026-03-01',
-        'Dr. Smith',
-        baseRawAsset,
-        null,
-        null,
-        { SNA: 82.0, SNB: 78.5 }
-      );
-
-      const passed =
-        baseFp === sameFp &&
-        baseFp !== changedFileBytesFp &&
-        baseFp !== mutatedStageFp &&
-        baseFp !== mutatedMeasFp &&
-        baseFp !== mutatedReviewerFp;
-
+      const passed01 = digestA === digestB;
       addResult(
-        'P3K-15',
-        'Production approval fingerprint calculation & byte-level asset content invalidation (P0-B)',
-        passed,
-        `Identical datasets match: ${baseFp === sameFp}, Changed file bytes rejected: ${baseFp !== changedFileBytesFp}, Mutated stage rejected: ${baseFp !== mutatedStageFp}, Mutated measurements rejected: ${baseFp !== mutatedMeasFp}`
+        'P3K-15-DIGEST-01',
+        'computeBinaryContentDigest invariance across Data URL headers for identical binary bytes',
+        passed01,
+        `MIME JPEG digest: ${digestA.slice(0, 16)}..., MIME PNG digest: ${digestB.slice(0, 16)}... Matches: ${passed01}`
+      );
+
+      const passed02 = digestA !== digestMutated;
+      addResult(
+        'P3K-15-DIGEST-02',
+        'computeBinaryContentDigest sensitivity to binary asset byte mutation',
+        passed02,
+        `Original digest: ${digestA.slice(0, 16)}..., Mutated digest: ${digestMutated.slice(0, 16)}... Rejection verified: ${passed02}`
       );
     } catch (err: unknown) {
-      addResult('P3K-15', 'Production approval fingerprint invalidation', false, String(err));
+      addResult('P3K-15-DIGEST-01', 'computeBinaryContentDigest test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // P3K-15-FP-FILENAME: Dataset Fingerprint Sensitivity to Filename Renaming
+    // ------------------------------------------------------------------------
+    try {
+      const baseAssetA = { fileName: 'ceph_radiograph_v1.jpg', fileSize: 102450, dataUrl: 'data:image/jpeg;base64,QUFBX1JBV19DRVBIX0JZVEVfU1RSRUFNX09SSUdJTkFMX1ZFUlNJT05fMTEx' };
+      const baseAssetRenamed = { fileName: 'ceph_radiograph_RENAMED.jpg', fileSize: 102450, dataUrl: 'data:image/jpeg;base64,QUFBX1JBV19DRVBIX0JZVEVfU1RSRUFNX09SSUdJTkFMX1ZFUlNJT05fMTEx' };
+
+      const fpOriginal = await computeDatasetFingerprint('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', baseAssetA, null, null, { SNA: 82.0 });
+      const fpRenamed = await computeDatasetFingerprint('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', baseAssetRenamed, null, null, { SNA: 82.0 });
+
+      const digestOriginal = await computeBinaryContentDigest(baseAssetA.dataUrl);
+      const digestRenamed = await computeBinaryContentDigest(baseAssetRenamed.dataUrl);
+
+      const passedFilenameTest = digestOriginal === digestRenamed && fpOriginal !== fpRenamed;
+      addResult(
+        'P3K-15-FP-FILENAME',
+        'Dataset fingerprint invalidation upon asset filename renaming with identical binary bytes',
+        passedFilenameTest,
+        `Binary content digests match: ${digestOriginal === digestRenamed}, Dataset fingerprints invalidation verified: ${fpOriginal !== fpRenamed}`
+      );
+    } catch (err: unknown) {
+      addResult('P3K-15-FP-FILENAME', 'Dataset fingerprint filename renaming test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // P3K-15A through P3K-15G: Comprehensive Dataset Fingerprint Invalidation Matrix
+    // ------------------------------------------------------------------------
+    try {
+      const baseRawAsset = { fileName: 'ceph_lateral.jpg', fileSize: 102450, dataUrl: 'data:image/jpeg;base64,QUFBX1JBV19DRVBIX0JZVEVfU1RSRUFNX09SSUdJTkFMX1ZFUlNJT05fMTEx' };
+      const baseTraceAsset = { fileName: 'tracing_overlay.png', fileSize: 85200, dataUrl: 'data:image/png;base64,Q0NDX1RSQUNJTkdfT1ZFUkxBWV9CWVRFX1NUUkVBTV9WRVJTSU9OXzExMQ==' };
+      const basePdfAsset = { fileName: 'ceph_report.pdf', fileSize: 412000, dataUrl: 'data:application/pdf;base64,REREX1BERl9SRVBPUlRfQllURV9TVFJFQU1fVkVSU0lPTl8xMTE=' };
+
+      const baseFp = await computeDatasetFingerprint('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', baseRawAsset, baseTraceAsset, basePdfAsset, { SNA: 82.0, SNB: 78.5 });
+
+      // P3K-15A: Identical dataset re-fingerprinting
+      const sameFp = await computeDatasetFingerprint('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', { ...baseRawAsset }, { ...baseTraceAsset }, { ...basePdfAsset }, { SNA: 82.0, SNB: 78.5 });
+      addResult('P3K-15A', 'Identical dataset re-fingerprinting match', baseFp === sameFp, `Fingerprints match: ${baseFp === sameFp}`);
+
+      // P3K-15B: rawRadiograph byte mutation
+      const mutRawAsset = { ...baseRawAsset, dataUrl: 'data:image/jpeg;base64,QkJCX01VVEFURURfQ0VQSF9CWVRFX1NUUkVBTV9ORVdfSU1BR0VfQllURVNfMjIy' };
+      const mutRawFp = await computeDatasetFingerprint('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', mutRawAsset, baseTraceAsset, basePdfAsset, { SNA: 82.0, SNB: 78.5 });
+      addResult('P3K-15B', 'rawRadiograph byte mutation approval invalidation', baseFp !== mutRawFp, `Raw byte mutation rejected: ${baseFp !== mutRawFp}`);
+
+      // P3K-15C: tracingImage byte mutation
+      const mutTraceAsset = { ...baseTraceAsset, dataUrl: 'data:image/png;base64,QkJCX01VVEFURURfQ0VQSF9CWVRFX1NUUkVBTV9ORVdfSU1BR0VfQllURVNfMjIy' };
+      const mutTraceFp = await computeDatasetFingerprint('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', baseRawAsset, mutTraceAsset, basePdfAsset, { SNA: 82.0, SNB: 78.5 });
+      addResult('P3K-15C', 'tracingImage byte mutation approval invalidation', baseFp !== mutTraceFp, `Tracing byte mutation rejected: ${baseFp !== mutTraceFp}`);
+
+      // P3K-15D: pdfReport byte mutation
+      const mutPdfAsset = { ...basePdfAsset, dataUrl: 'data:application/pdf;base64,QkJCX01VVEFURURfQ0VQSF9CWVRFX1NUUkVBTV9ORVdfSU1BR0VfQllURVNfMjIy' };
+      const mutPdfFp = await computeDatasetFingerprint('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', baseRawAsset, baseTraceAsset, mutPdfAsset, { SNA: 82.0, SNB: 78.5 });
+      addResult('P3K-15D', 'pdfReport byte mutation approval invalidation', baseFp !== mutPdfFp, `PDF byte mutation rejected: ${baseFp !== mutPdfFp}`);
+
+      // P3K-15E: acquisitionDate mutation alone
+      const mutDateFp = await computeDatasetFingerprint('T0_Initial', '2026-03-02', 'Dr. Al-Basmi', baseRawAsset, baseTraceAsset, basePdfAsset, { SNA: 82.0, SNB: 78.5 });
+      addResult('P3K-15E', 'acquisitionDate mutation approval invalidation', baseFp !== mutDateFp, `Date mutation rejected: ${baseFp !== mutDateFp}`);
+
+      // P3K-15F: doctorReviewer mutation alone
+      const mutReviewerFp = await computeDatasetFingerprint('T0_Initial', '2026-03-01', 'Dr. Salem', baseRawAsset, baseTraceAsset, basePdfAsset, { SNA: 82.0, SNB: 78.5 });
+      addResult('P3K-15F', 'doctorReviewer mutation approval invalidation', baseFp !== mutReviewerFp, `Reviewer mutation rejected: ${baseFp !== mutReviewerFp}`);
+
+      // P3K-15G: Single measurement value edit
+      const mutMeasFp = await computeDatasetFingerprint('T0_Initial', '2026-03-01', 'Dr. Al-Basmi', baseRawAsset, baseTraceAsset, basePdfAsset, { SNA: 82.1, SNB: 78.5 });
+      addResult('P3K-15G', 'Single measurement value edit approval invalidation', baseFp !== mutMeasFp, `Measurement edit rejected: ${baseFp !== mutMeasFp}`);
+    } catch (err: unknown) {
+      addResult('P3K-15A', 'Dataset fingerprint invalidation matrix test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // P3K-15H through P3K-15M: Strict Base64 & Data URL Validation Contract
+    // ------------------------------------------------------------------------
+    try {
+      // P3K-15H: Missing or null Data URL
+      let caughtH = false;
+      try { await computeBinaryContentDigest(''); } catch (e: any) { caughtH = e?.message?.includes('ERR_INVALID_ASSET_DATA'); }
+      addResult('P3K-15H', 'Rejection of missing or empty Data URL string', caughtH, `Thrown ERR_INVALID_ASSET_DATA: ${caughtH}`);
+
+      // P3K-15I: Malformed Data URL prefix
+      let caughtI = false;
+      try { await computeBinaryContentDigest('invalid_prefix_without_data_url_header'); } catch (e: any) { caughtI = e?.message?.includes('ERR_MALFORMED_DATA_URL'); }
+      addResult('P3K-15I', 'Rejection of malformed Data URL prefix', caughtI, `Thrown ERR_MALFORMED_DATA_URL: ${caughtI}`);
+
+      // P3K-15J: Invalid Base64 character syntax
+      let caughtJ = false;
+      try { await computeBinaryContentDigest('data:image/jpeg;base64,AAA_INVALID_CHARS!!!'); } catch (e: any) { caughtJ = e?.message?.includes('ERR_MALFORMED_BASE64_SYNTAX'); }
+      addResult('P3K-15J', 'Rejection of invalid Base64 character syntax', caughtJ, `Thrown ERR_MALFORMED_BASE64_SYNTAX: ${caughtJ}`);
+
+      // P3K-15K: Invalid Base64 padding length
+      let caughtK = false;
+      try { await computeBinaryContentDigest('data:image/jpeg;base64,AAA'); } catch (e: any) { caughtK = e?.message?.includes('ERR_MALFORMED_BASE64_PADDING'); }
+      addResult('P3K-15K', 'Rejection of invalid Base64 padding length', caughtK, `Thrown ERR_MALFORMED_BASE64_PADDING: ${caughtK}`);
+
+      // P3K-15L: Non-canonical trailing bits / excessive padding
+      let caughtL = false;
+      try { await computeBinaryContentDigest('data:image/jpeg;base64,a==='); } catch (e: any) { caughtL = e?.message?.includes('ERR_MALFORMED_BASE64_SYNTAX') || e?.message?.includes('ERR_MALFORMED_BASE64_PADDING') || e?.message?.includes('ERR_NON_CANONICAL_BASE64'); }
+      addResult('P3K-15L', 'Rejection of non-canonical trailing bits or excessive padding', caughtL, `Thrown expected padding/syntax error: ${caughtL}`);
+
+      // P3K-15M: Unsupported MIME type
+      let caughtM = false;
+      try { await computeBinaryContentDigest('data:image/bmp;base64,AAAA'); } catch (e: any) { caughtM = e?.message?.includes('ERR_UNSUPPORTED_MIME_TYPE'); }
+      addResult('P3K-15M', 'Rejection of unsupported clinical asset MIME type (image/bmp)', caughtM, `Thrown ERR_UNSUPPORTED_MIME_TYPE: ${caughtM}`);
+    } catch (err: unknown) {
+      addResult('P3K-15H', 'Strict Base64 validation test suite failed', false, String(err));
     }
 
     // ------------------------------------------------------------------------
@@ -788,56 +827,45 @@ export async function runCohort2CephalometricForensicSuite(
     }
 
     // ------------------------------------------------------------------------
-    // P3K-17: Durable Persistent VFS (IndexedDB / OPFS) Cross-Adapter Reopen Verification (R6 Remediation A)
+    // P3K-17A & P3K-17B: Target A (AI Studio Preview) & Target B (iPad Safari) Durable Persistence Verification
     // ------------------------------------------------------------------------
     try {
-      const durableDbName = `p3k_idb_durable_test_${Date.now()}.db`;
-      let idbAdapter: WaSqliteStorageAdapter | null = null;
+      const durableDbNameA = `p3k_idb_iframe_test_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.db`;
+      let idbAdapterA: WaSqliteStorageAdapter | null = null;
       try {
-        idbAdapter = new WaSqliteStorageAdapter({
-          databaseName: durableDbName,
+        idbAdapterA = new WaSqliteStorageAdapter({
+          databaseName: durableDbNameA,
           preferredVfs: 'INDEXEDDB',
           mode: 'CLINICAL',
           allowPreviewEphemeral: false,
           wasmBinary: options.wasmBinary,
         });
-        await idbAdapter.initialize();
+        await idbAdapterA.initialize();
       } catch {
-        // Clinical mode throws if persistent storage is unavailable
-        idbAdapter = null;
+        idbAdapterA = null;
       }
 
-      if (!idbAdapter || (idbAdapter.driverId !== 'INDEXEDDB' && idbAdapter.driverId !== 'OPFS')) {
-        if (idbAdapter) {
-          try { await idbAdapter.close(); } catch {}
-        }
+      if (!idbAdapterA || (idbAdapterA.driverId !== 'INDEXEDDB' && idbAdapterA.driverId !== 'OPFS')) {
+        if (idbAdapterA) { try { await idbAdapterA.close(); } catch {} }
         addResult(
-          'P3K-17',
-          'Durable IndexedDB / OPFS persistence & cross-adapter reopen readback (P0-A)',
+          'P3K-17A',
+          'Target A (AI Studio Preview iframe) IndexedDB durable persistence & fresh-adapter reopen readback',
           false,
-          `Persistent storage (IndexedDB / OPFS) unavailable in current test environment. Fallback to memory rejected for durability test.`,
-          `Environment limitation: active driver is ${idbAdapter?.driverId || 'NONE'}. IndexedDB / OPFS requires browser context.`
+          `Persistent storage (IndexedDB / OPFS) unavailable in current test environment. Fallback to memory rejected.`,
+          `Environment limitation: active driver is ${idbAdapterA?.driverId || 'NONE'}. IndexedDB / OPFS requires browser context.`
         );
       } else {
-        // Durable VFS is genuinely available (e.g. Browser Preview context with IndexedDB)
-        const cleanSql = P0_PRODUCTION_SQLITE_DDL
-          .split('\n')
-          .filter((line) => !line.trim().startsWith('--'))
-          .join('\n');
-        const statements = cleanSql
-          .split(';')
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0);
-
+        const cleanSql = P0_PRODUCTION_SQLITE_DDL.split('\n').filter((line) => !line.trim().startsWith('--')).join('\n');
+        const statements = cleanSql.split(';').map((s) => s.trim()).filter((s) => s.length > 0);
         for (const stmt of statements) {
-          try { await idbAdapter.execute(`${stmt};`); } catch (err: any) {
+          try { await idbAdapterA.execute(`${stmt};`); } catch (err: any) {
             if (!err?.message?.includes('already exists')) throw err;
           }
         }
 
-        const idbPatientService = new Cohort2PatientPersistenceService(idbAdapter);
-        const idbCaseService = new Cohort2CasePersistenceService(idbAdapter);
-        const idbCephService = new Cohort2CephalometricPersistenceService(idbAdapter);
+        const idbPatientService = new Cohort2PatientPersistenceService(idbAdapterA);
+        const idbCaseService = new Cohort2CasePersistenceService(idbAdapterA);
+        const idbCephService = new Cohort2CephalometricPersistenceService(idbAdapterA);
 
         const idbPat = await idbPatientService.createPatient({
           id: 'pat-idb-dur-001',
@@ -877,12 +905,12 @@ export async function runCohort2CephalometricForensicSuite(
           operationId: 'op-p3k-idb-durability-001',
         });
 
-        await idbAdapter.flushToDurableStorage();
-        await idbAdapter.close();
+        await idbAdapterA.flushToDurableStorage();
+        await idbAdapterA.close();
 
-        // Instantiate completely NEW adapter instance for fresh reopen
+        // Fresh adapter reopen
         const reopenAdapter = new WaSqliteStorageAdapter({
-          databaseName: durableDbName,
+          databaseName: durableDbNameA,
           preferredVfs: 'INDEXEDDB',
           mode: 'CLINICAL',
           allowPreviewEphemeral: false,
@@ -909,14 +937,23 @@ export async function runCohort2CephalometricForensicSuite(
         await reopenAdapter.close();
 
         addResult(
-          'P3K-17',
-          'Durable IndexedDB / OPFS persistence & cross-adapter reopen readback (P0-A)',
+          'P3K-17A',
+          'Target A (AI Studio Preview iframe) IndexedDB durable persistence & fresh-adapter reopen readback',
           passed,
           `Driver: ${reopenAdapter.driverId}, Study ID: ${t0Study?.id}, Measurements: ${t0Meas.length}, SNA=${snaVal}°, ANB=${anbVal}°`
         );
       }
+
+      // P3K-17B Target B (iPad Safari) Status Registration
+      addResult(
+        'P3K-17B',
+        'Target B (iPad Safari PWA context) OPFS / IndexedDB durable persistence & fresh-adapter reopen readback',
+        false,
+        'Target B requires browser execution on iPadOS Safari runtime.',
+        'Target B environment limitation: Not executed in headless Node runner environment.'
+      );
     } catch (err: unknown) {
-      addResult('P3K-17', 'Durable IndexedDB / OPFS persistence', false, String(err));
+      addResult('P3K-17A', 'Durable IndexedDB persistence test failed', false, String(err));
     }
 
     // ------------------------------------------------------------------------
