@@ -59,16 +59,40 @@ export interface WebCephImportModalProps {
 }
 
 /**
- * Fast, deterministic FNV-1a 32-bit hash for string content (e.g. dataUrls).
- * Avoids external crypto dependencies while guaranteeing byte-level content change detection.
+ * Asynchronous, deterministic SHA-256 digest for string content (e.g. dataUrls).
+ * Uses Web Crypto API (crypto.subtle.digest) with Node.js crypto fallback.
  */
-export function computeContentDigest(str: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    hash ^= str.charCodeAt(i);
-    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+export async function computeContentDigest(str: string): Promise<string> {
+  if (!str) return '0000000000000000000000000000000000000000000000000000000000000000';
+
+  // 1. Web Crypto API (Browser & modern Node)
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.subtle) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(str);
+    const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
   }
-  return (hash >>> 0).toString(16).padStart(8, '0');
+
+  // 2. Node.js crypto module fallback
+  try {
+    const nodeCrypto = await import('node:crypto');
+    return nodeCrypto.createHash('sha256').update(str).digest('hex');
+  } catch {
+    // 3. Fallback deterministic 64-char hex digest
+    let hash1 = 0x811c9dc5;
+    let hash2 = 0x55555555;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash1 ^= char;
+      hash1 += (hash1 << 1) + (hash1 << 4) + (hash1 << 7) + (hash1 << 8) + (hash1 << 24);
+      hash2 ^= char;
+      hash2 = (hash2 << 5) - hash2;
+    }
+    const hex1 = (hash1 >>> 0).toString(16).padStart(8, '0');
+    const hex2 = (hash2 >>> 0).toString(16).padStart(8, '0');
+    return (hex1 + hex2).repeat(4).slice(0, 64);
+  }
 }
 
 export interface AssetFingerprintInput {
@@ -77,7 +101,7 @@ export interface AssetFingerprintInput {
   dataUrl?: string;
 }
 
-export function computeDatasetFingerprint(
+export async function computeDatasetFingerprint(
   stage: TimepointStage,
   date: string,
   reviewer: string,
@@ -85,25 +109,29 @@ export function computeDatasetFingerprint(
   trace: AssetFingerprintInput | null,
   pdf: AssetFingerprintInput | null,
   meas: Record<string, number>
-): string {
+): Promise<string> {
   const cleanKeys = Object.keys(meas)
     .filter((k) => typeof meas[k] === 'number' && !isNaN(meas[k]) && isFinite(meas[k]))
     .sort();
   const measStr = cleanKeys.map((k) => `${k}:${meas[k]}`).join('|');
 
-  const formatAsset = (a: AssetFingerprintInput | null) => {
+  const formatAsset = async (a: AssetFingerprintInput | null) => {
     if (!a) return 'none';
-    const digest = a.dataUrl ? computeContentDigest(a.dataUrl) : 'nodata';
+    const digest = a.dataUrl ? await computeContentDigest(a.dataUrl) : 'nodata';
     return `${a.fileName}:${a.fileSize}:${digest}`;
   };
+
+  const rawFormatted = await formatAsset(raw);
+  const traceFormatted = await formatAsset(trace);
+  const pdfFormatted = await formatAsset(pdf);
 
   return [
     stage,
     date,
     reviewer.trim().toLowerCase(),
-    formatAsset(raw),
-    formatAsset(trace),
-    formatAsset(pdf),
+    rawFormatted,
+    traceFormatted,
+    pdfFormatted,
     measStr,
   ].join(':::');
 }
@@ -175,7 +203,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
   }, []);
 
   // P0-B: Doctor approval checkbox handler (calculates & locks fingerprint upon sign-off)
-  const handleToggleApproval = (checked: boolean) => {
+  const handleToggleApproval = async (checked: boolean) => {
     if (checked) {
       const cleanMeas: Record<string, number> = {};
       Object.entries(measurements).forEach(([code, val]) => {
@@ -183,7 +211,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
           cleanMeas[code] = val;
         }
       });
-      const fp = computeDatasetFingerprint(
+      const fp = await computeDatasetFingerprint(
         targetStage,
         acquisitionDate,
         doctorReviewer,
@@ -364,7 +392,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
     }
   };
 
-  const handleCommit = () => {
+  const handleCommit = async () => {
     if (!isDoctorApproved || doctorReviewer.trim().length === 0) return;
 
     const cleanMeasurements: Record<string, number> = {};
@@ -374,7 +402,7 @@ export const WebCephImportModal: React.FC<WebCephImportModalProps> = ({
       }
     });
 
-    const currentFp = computeDatasetFingerprint(
+    const currentFp = await computeDatasetFingerprint(
       targetStage,
       acquisitionDate,
       doctorReviewer,

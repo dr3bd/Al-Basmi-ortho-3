@@ -651,7 +651,7 @@ export async function runCohort2CephalometricForensicSuite(
         dataUrl: 'data:image/jpeg;base64,AAA_RAW_CEPH_BYTE_STREAM_ORIGINAL_VERSION_111',
       };
 
-      const baseFp = computeDatasetFingerprint(
+      const baseFp = await computeDatasetFingerprint(
         'T0_Initial',
         '2026-03-01',
         'Dr. Al-Basmi',
@@ -662,7 +662,7 @@ export async function runCohort2CephalometricForensicSuite(
       );
 
       // 1. Exact identical dataset (must match)
-      const sameFp = computeDatasetFingerprint(
+      const sameFp = await computeDatasetFingerprint(
         'T0_Initial',
         '2026-03-01',
         'Dr. Al-Basmi',
@@ -678,7 +678,7 @@ export async function runCohort2CephalometricForensicSuite(
         fileSize: 102450, // Identical filename and size
         dataUrl: 'data:image/jpeg;base64,BBB_MUTATED_CEPH_BYTE_STREAM_NEW_IMAGE_BYTES_222', // Modified content
       };
-      const changedFileBytesFp = computeDatasetFingerprint(
+      const changedFileBytesFp = await computeDatasetFingerprint(
         'T0_Initial',
         '2026-03-01',
         'Dr. Al-Basmi',
@@ -689,7 +689,7 @@ export async function runCohort2CephalometricForensicSuite(
       );
 
       // 3. Mutated stage (must invalidate approval)
-      const mutatedStageFp = computeDatasetFingerprint(
+      const mutatedStageFp = await computeDatasetFingerprint(
         'T1_Progress',
         '2026-03-01',
         'Dr. Al-Basmi',
@@ -700,7 +700,7 @@ export async function runCohort2CephalometricForensicSuite(
       );
 
       // 4. Mutated measurements (must invalidate approval)
-      const mutatedMeasFp = computeDatasetFingerprint(
+      const mutatedMeasFp = await computeDatasetFingerprint(
         'T0_Initial',
         '2026-03-01',
         'Dr. Al-Basmi',
@@ -711,7 +711,7 @@ export async function runCohort2CephalometricForensicSuite(
       );
 
       // 5. Mutated reviewer / date (must invalidate approval)
-      const mutatedReviewerFp = computeDatasetFingerprint(
+      const mutatedReviewerFp = await computeDatasetFingerprint(
         'T0_Initial',
         '2026-03-01',
         'Dr. Smith',
@@ -785,6 +785,138 @@ export async function runCohort2CephalometricForensicSuite(
       );
     } catch (err: unknown) {
       addResult('P3K-16', 'Multi-stage isolation', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // P3K-17: Durable Persistent VFS (IndexedDB / OPFS) Cross-Adapter Reopen Verification (R6 Remediation A)
+    // ------------------------------------------------------------------------
+    try {
+      const durableDbName = `p3k_idb_durable_test_${Date.now()}.db`;
+      let idbAdapter: WaSqliteStorageAdapter | null = null;
+      try {
+        idbAdapter = new WaSqliteStorageAdapter({
+          databaseName: durableDbName,
+          preferredVfs: 'INDEXEDDB',
+          mode: 'CLINICAL',
+          allowPreviewEphemeral: false,
+          wasmBinary: options.wasmBinary,
+        });
+        await idbAdapter.initialize();
+      } catch {
+        // Clinical mode throws if persistent storage is unavailable
+        idbAdapter = null;
+      }
+
+      if (!idbAdapter || (idbAdapter.driverId !== 'INDEXEDDB' && idbAdapter.driverId !== 'OPFS')) {
+        if (idbAdapter) {
+          try { await idbAdapter.close(); } catch {}
+        }
+        addResult(
+          'P3K-17',
+          'Durable IndexedDB / OPFS persistence & cross-adapter reopen readback (P0-A)',
+          false,
+          `Persistent storage (IndexedDB / OPFS) unavailable in current test environment. Fallback to memory rejected for durability test.`,
+          `Environment limitation: active driver is ${idbAdapter?.driverId || 'NONE'}. IndexedDB / OPFS requires browser context.`
+        );
+      } else {
+        // Durable VFS is genuinely available (e.g. Browser Preview context with IndexedDB)
+        const cleanSql = P0_PRODUCTION_SQLITE_DDL
+          .split('\n')
+          .filter((line) => !line.trim().startsWith('--'))
+          .join('\n');
+        const statements = cleanSql
+          .split(';')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+
+        for (const stmt of statements) {
+          try { await idbAdapter.execute(`${stmt};`); } catch (err: any) {
+            if (!err?.message?.includes('already exists')) throw err;
+          }
+        }
+
+        const idbPatientService = new Cohort2PatientPersistenceService(idbAdapter);
+        const idbCaseService = new Cohort2CasePersistenceService(idbAdapter);
+        const idbCephService = new Cohort2CephalometricPersistenceService(idbAdapter);
+
+        const idbPat = await idbPatientService.createPatient({
+          id: 'pat-idb-dur-001',
+          patientNumber: 'PAT-IDB-001',
+          firstName: 'مريم',
+          lastName: 'العتيبي',
+          sex: 'FEMALE',
+          dateOfBirth: '2012-04-15',
+          phone: '+966551122334',
+          userId: 'usr-dr-albasmi',
+          deviceId: 'dev-idb-durability',
+        });
+
+        const idbCase = await idbCaseService.createCase({
+          id: 'cas-idb-dur-001',
+          patientId: idbPat.patient.id,
+          chiefComplaint: 'Class II Division 1 malocclusion',
+          caseType: 'COMPREHENSIVE',
+          caseStatus: 'DIAGNOSIS',
+          primaryProviderId: 'usr-dr-albasmi',
+          clinicId: 'cln-main',
+          userId: 'usr-dr-albasmi',
+          deviceId: 'dev-idb-durability',
+        });
+
+        const idbSaveRes = await idbCephService.saveOrUpdateStudy({
+          caseId: idbCase.case.id,
+          studyStage: 'T0',
+          studyDate: '2026-03-15',
+          landmarkReviewStatus: 'DOCTOR_APPROVED',
+          measurements: [
+            { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'SNA', value: 82.5, unit: '°' },
+            { analysisCode: 'WEBCEPH_DEFAULT', measurementCode: 'ANB', value: 3.5, unit: '°' },
+          ],
+          userId: 'usr-dr-albasmi',
+          deviceId: 'dev-idb-durability',
+          operationId: 'op-p3k-idb-durability-001',
+        });
+
+        await idbAdapter.flushToDurableStorage();
+        await idbAdapter.close();
+
+        // Instantiate completely NEW adapter instance for fresh reopen
+        const reopenAdapter = new WaSqliteStorageAdapter({
+          databaseName: durableDbName,
+          preferredVfs: 'INDEXEDDB',
+          mode: 'CLINICAL',
+          allowPreviewEphemeral: false,
+          wasmBinary: options.wasmBinary,
+        });
+        await reopenAdapter.initialize();
+
+        const freshIdbCephService = new Cohort2CephalometricPersistenceService(reopenAdapter);
+        const reopenedStudies = await freshIdbCephService.listStudiesByCaseId(idbCase.case.id);
+        const t0Study = reopenedStudies.find((s) => s.study_stage === 'T0');
+        const t0Meas = t0Study ? await freshIdbCephService.listMeasurementsByStudyId(t0Study.id) : [];
+
+        const snaVal = t0Meas.find((m) => m.measurement_code === 'SNA')?.value;
+        const anbVal = t0Meas.find((m) => m.measurement_code === 'ANB')?.value;
+
+        const passed =
+          t0Study !== undefined &&
+          t0Study.id === idbSaveRes.study.id &&
+          t0Meas.length === 2 &&
+          snaVal === 82.5 &&
+          anbVal === 3.5 &&
+          (reopenAdapter.driverId === 'INDEXEDDB' || reopenAdapter.driverId === 'OPFS');
+
+        await reopenAdapter.close();
+
+        addResult(
+          'P3K-17',
+          'Durable IndexedDB / OPFS persistence & cross-adapter reopen readback (P0-A)',
+          passed,
+          `Driver: ${reopenAdapter.driverId}, Study ID: ${t0Study?.id}, Measurements: ${t0Meas.length}, SNA=${snaVal}°, ANB=${anbVal}°`
+        );
+      }
+    } catch (err: unknown) {
+      addResult('P3K-17', 'Durable IndexedDB / OPFS persistence', false, String(err));
     }
 
     // ------------------------------------------------------------------------
