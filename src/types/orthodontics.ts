@@ -239,6 +239,59 @@ export type ClinicalPhotoCategory =
   | 'Periapical / Other'
   | string;
 
+export interface ImageTransformParams {
+  crop: { x: number; y: number; width: number; height: number } | null; // normalized 0..100 percentages
+  rotation: 0 | 90 | 180 | 270;
+  flipH: boolean;
+  flipV: boolean;
+  brightness: number; // 0..200 (100 = default)
+  contrast: number;   // 0..200 (100 = default)
+  saturation: number; // 0..200 (100 = default)
+  grayscale: boolean;
+  sharpness: number;  // 0..100 (0 = default)
+}
+
+export type ImageAnnotationType = 'freehand' | 'line' | 'arrow' | 'rectangle' | 'circle' | 'text';
+
+export interface ImageAnnotationItem {
+  id: string;
+  type: ImageAnnotationType;
+  color: string;
+  strokeWidth: number;
+  points?: { x: number; y: number }[]; // normalized 0..100 percentages
+  x1?: number; // normalized 0..100
+  y1?: number;
+  x2?: number;
+  y2?: number;
+  text?: string;
+  fontSize?: number;
+  isUncalibrated?: boolean; // Safety: explicit flag for uncalibrated visual annotations
+}
+
+export interface ImageEditingRecipe {
+  recipeVersion: '1.0';
+  sourceAssetId: string;
+  sourceChecksum?: string;
+  transform: ImageTransformParams;
+  annotations: ImageAnnotationItem[];
+  createdAt: string;
+  createdById?: string;
+}
+
+export interface ApprovedImageDerivative {
+  id: string;
+  sourceAssetId: string;
+  category: ClinicalPhotoCategory;
+  stage: TimepointStage;
+  dataUrl: string;
+  binaryData: Uint8Array;
+  mimeType: string;
+  fileSize: number;
+  recipe: ImageEditingRecipe;
+  captionEn: string;
+  captionAr: string;
+}
+
 export interface ClinicalPhotoRecord {
   id: string;
   stage: TimepointStage;
@@ -250,6 +303,8 @@ export interface ClinicalPhotoRecord {
   dataUrl?: string;
   integrityStatus?: 'VALID' | 'CORRUPT' | 'MISSING';
   integrityError?: string;
+  parentAssetId?: string;
+  editingRecipe?: ImageEditingRecipe;
 }
 
 export interface ResidualAndRetentionRecord {

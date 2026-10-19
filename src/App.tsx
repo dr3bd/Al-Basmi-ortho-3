@@ -430,6 +430,8 @@ async function mapSqliteMediaToPhoto(
   let captionEn = '';
   let captionAr = '';
   let svgType = 'photo_custom';
+  let parentAssetId: string | undefined = undefined;
+  let editingRecipe: any = undefined;
 
   if (asset.metadata_json) {
     try {
@@ -439,6 +441,8 @@ async function mapSqliteMediaToPhoto(
       if (parsed.captionEn) captionEn = parsed.captionEn;
       if (parsed.captionAr) captionAr = parsed.captionAr;
       if (parsed.svgType) svgType = parsed.svgType;
+      if (parsed.parentAssetId) parentAssetId = parsed.parentAssetId;
+      if (parsed.editingRecipe) editingRecipe = parsed.editingRecipe;
     } catch {
       // Ignore parse failure
     }
@@ -483,6 +487,8 @@ async function mapSqliteMediaToPhoto(
     dataUrl,
     integrityStatus,
     integrityError,
+    parentAssetId,
+    editingRecipe,
   };
 }
 
@@ -865,6 +871,12 @@ export default function App() {
                   // Ignore media load failure for single case
                 }
               }
+              if (casePhotos.length === 0) {
+                const seedCase = INITIAL_CASES.find((c) => c.id === row.id);
+                if (seedCase && seedCase.photos) {
+                  casePhotos = [...seedCase.photos];
+                }
+              }
 
               let caseCephRecords: CephStageRecord[] = [];
               if (cohort2CephService) {
@@ -1206,14 +1218,39 @@ export default function App() {
         const deletedPhotos = basePhotos.filter((bp) => !updatedPhotos.some((up) => up.id === bp.id));
         if (deletedPhotos.length > 0 && cohort2MediaService) {
           for (const dp of deletedPhotos) {
-            await cohort2MediaService.softDeleteMediaAsset({
-              assetId: dp.id,
-              caseId: updated.id,
-              userId: 'usr-dr-albasmi',
-              userRole: 'ORTHODONTIST',
-              deviceId,
-              timestamp: nowIso,
-            });
+            // Never soft-delete synthetic sample demonstration photos in SQLite
+            if (!dp.id.startsWith('ph_sample_')) {
+              await cohort2MediaService.softDeleteMediaAsset({
+                assetId: dp.id,
+                caseId: updated.id,
+                userId: 'usr-dr-albasmi',
+                userRole: 'ORTHODONTIST',
+                deviceId,
+                timestamp: nowIso,
+              });
+            }
+          }
+        }
+
+        // Check if any previously soft-deleted asset is restored in updatedPhotos
+        if (cohort2MediaService) {
+          try {
+            const allAssets = await cohort2MediaService.listMediaAssetsByCaseId(updated.id, true);
+            const softDeleted = allAssets.filter((a) => a.is_deleted === 1);
+            for (const sda of softDeleted) {
+              if (updatedPhotos.some((up) => up.id === sda.id)) {
+                await cohort2MediaService.restoreMediaAsset({
+                  assetId: sda.id,
+                  caseId: updated.id,
+                  userId: 'usr-dr-albasmi',
+                  userRole: 'ORTHODONTIST',
+                  deviceId,
+                  timestamp: nowIso,
+                });
+              }
+            }
+          } catch {
+            // Non-blocking restore check
           }
         }
 
@@ -1270,6 +1307,8 @@ export default function App() {
               captionEn: photo.captionEn,
               captionAr: photo.captionAr,
               svgType: photo.svgType,
+              parentAssetId: photo.parentAssetId,
+              editingRecipe: photo.editingRecipe,
               userId: 'usr-dr-albasmi',
               userRole: 'ORTHODONTIST',
               deviceId,

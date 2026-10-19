@@ -33,6 +33,9 @@ import {
 import { formatPhotoCategory, formatTimepointStage } from '../../utils/i18n';
 import { ClinicalRecordIllustration } from '../CephTracingCanvas';
 import { WebCephImportModal, WebCephImportResult } from './WebCephImportModal';
+import { ClinicalImageEditorModal } from './ClinicalImageEditorModal';
+import { ApprovedImageDerivative } from '../../types/orthodontics';
+import { INITIAL_CASES } from '../../data/seedCases';
 
 export interface ClinicalMediaWorkspaceProps {
   orthoCase: OrthodonticCase;
@@ -251,11 +254,52 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
   const isAr = language === 'ar';
   const [activeStageFilter, setActiveStageFilter] = React.useState<TimepointStage | 'ALL'>('T0_Initial');
   const [viewMode, setViewMode] = React.useState<'grid' | 'comparison'>('grid');
+  const [mediaViewScope, setMediaViewScope] = React.useState<'clinical' | 'samples' | 'all'>('clinical');
   const [lightboxPhoto, setLightboxPhoto] = React.useState<ClinicalPhotoRecord | null>(null);
+  const [imageEditorPhoto, setImageEditorPhoto] = React.useState<ClinicalPhotoRecord | null>(null);
   const [editingPhoto, setEditingPhoto] = React.useState<ClinicalPhotoRecord | null>(null);
+  const [slotActivePhotoId, setSlotActivePhotoId] = React.useState<Record<string, string>>({});
   const [showAddCustomModal, setShowAddCustomModal] = React.useState<boolean>(false);
   const [showWebCephImportModal, setShowWebCephImportModal] = React.useState<boolean>(false);
   const [dragOverSlotKey, setDragOverSlotKey] = React.useState<string | null>(null);
+
+  const handleSaveDerivative = async (derivative: ApprovedImageDerivative) => {
+    const derivativeRecord: ClinicalPhotoRecord = {
+      id: derivative.id,
+      stage: derivative.stage,
+      date: new Date().toISOString().slice(0, 10),
+      category: derivative.category,
+      captionEn: derivative.captionEn,
+      captionAr: derivative.captionAr,
+      svgType: 'photo_custom',
+      dataUrl: derivative.dataUrl,
+      parentAssetId: derivative.sourceAssetId,
+      editingRecipe: derivative.recipe,
+    };
+
+    const updatedPhotos = [derivativeRecord, ...photos];
+
+    onUpdateCase(
+      {
+        ...orthoCase,
+        photos: updatedPhotos,
+      },
+      'SAVED_EDITED_IMAGE_DERIVATIVE',
+      `Created non-destructive edited derivative ${derivative.id} for source asset ${derivative.sourceAssetId}`
+    );
+
+    const slotDef = STANDARD_SLOTS.find(
+      (s) => s.category.toLowerCase().trim() === derivative.category.toLowerCase().trim()
+    );
+    if (slotDef) {
+      setSlotActivePhotoId((prev) => ({
+        ...prev,
+        [`${slotDef.key}_${derivative.stage}`]: derivative.id,
+      }));
+    }
+
+    setImageEditorPhoto(null);
+  };
 
   // Flexible Comparison State (Work A)
   const [compareMode, setCompareMode] = React.useState<'dual' | 'triple'>('dual');
@@ -534,8 +578,84 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
     setEditingPhoto(null);
   };
 
+  // Authoritative baseline clinical photos defined for this case ID in INITIAL_CASES
+  const baselineCasePhotos = React.useMemo(() => {
+    return INITIAL_CASES.find((c) => c.id === orthoCase.id)?.photos || [];
+  }, [orthoCase.id]);
+
+  // Derived counts for view scope
+  const clinicalPhotosCount = React.useMemo(() => {
+    return photos.filter((p) => !p.id.startsWith('ph_sample_')).length;
+  }, [photos]);
+
+  const samplePhotosCount = React.useMemo(() => {
+    return photos.filter((p) => p.id.startsWith('ph_sample_')).length;
+  }, [photos]);
+
+  // Authoritative clinical photos that exist in the baseline case specification but are missing from the current active case photos
+  const missingBaselinePhotos = React.useMemo(() => {
+    return baselineCasePhotos.filter((bp) => !photos.some((p) => p.id === bp.id));
+  }, [baselineCasePhotos, photos]);
+
+  // Auto-recovery guard: If no clinical photos exist in memory (e.g. wiped by an old destructive sample load), but baseline photos exist, automatically restore them non-destructively
+  React.useEffect(() => {
+    if (clinicalPhotosCount === 0 && baselineCasePhotos.length > 0) {
+      const existingSamples = photos.filter((p) => p.id.startsWith('ph_sample_'));
+      onUpdateCase(
+        {
+          ...orthoCase,
+          photos: [...baselineCasePhotos, ...existingSamples],
+        },
+        'AUTO_RESTORED_CLINICAL_PHOTOS',
+        `Restored ${baselineCasePhotos.length} authoritative clinical records for case ${orthoCase.id}`
+      );
+    }
+  }, [clinicalPhotosCount, baselineCasePhotos, orthoCase, onUpdateCase]);
+
+  // Explicit recovery action to restore any missing authoritative clinical photos
+  const handleRestoreClinicalPhotos = () => {
+    setMediaViewScope('clinical');
+    const existingClinical = photos.filter((p) => !p.id.startsWith('ph_sample_'));
+    const toRestore = baselineCasePhotos.filter((bp) => !existingClinical.some((p) => p.id === bp.id));
+    const merged = [...existingClinical, ...toRestore, ...photos.filter((p) => p.id.startsWith('ph_sample_'))];
+
+    onUpdateCase(
+      {
+        ...orthoCase,
+        photos: merged,
+      },
+      'MANUALLY_RESTORED_CLINICAL_PHOTOS',
+      `Restored ${toRestore.length} authoritative clinical records for case ${orthoCase.id}`
+    );
+  };
+
+  // Safe handler to return from sample/demo mode to clinical photo view
+  const handleReturnToClinicalPhotos = () => {
+    setMediaViewScope('clinical');
+    if (photos.filter((p) => !p.id.startsWith('ph_sample_')).length === 0 && baselineCasePhotos.length > 0) {
+      handleRestoreClinicalPhotos();
+    }
+  };
+
+  // Safe handler to unload demonstration sample photos without deleting or altering real patient photos
+  const handleUnloadSamples = () => {
+    setMediaViewScope('clinical');
+    const clinicalOnly = photos.filter((p) => !p.id.startsWith('ph_sample_'));
+    const finalPhotos = clinicalOnly.length > 0 ? clinicalOnly : baselineCasePhotos;
+
+    onUpdateCase(
+      {
+        ...orthoCase,
+        photos: finalPhotos,
+      },
+      'UNLOADED_SAMPLE_DEMO_SERIES',
+      `Safely unloaded demonstration sample series. Active clinical photos count: ${finalPhotos.length}`
+    );
+  };
+
   const handleLoadSampleSeries = () => {
-    // Generates a complete standard orthodontic clinical series for testing/demonstration
+    setMediaViewScope('samples');
+
     const sampleSeries: ClinicalPhotoRecord[] = [
       {
         id: `ph_sample_1`,
@@ -627,7 +747,6 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
         captionAr: 'أشعة بانورامية أولية: أسنان دائمة كاملة مع براعم أضراس العقل وسلامة اللقم الفكية.',
         svgType: 'panoramic_radiograph',
       },
-      // Stage T3 Finals for Comparison
       {
         id: `ph_sample_11`,
         stage: 'T3_Final',
@@ -657,21 +776,45 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
       },
     ];
 
-    onUpdateCase(
-      {
-        ...orthoCase,
-        photos: [...sampleSeries, ...photos.filter((p) => !sampleSeries.some((s) => s.category === p.category && s.stage === p.stage))],
-      },
-      'Loaded Sample Clinical Photography Series',
-      'Standard 10-view orthodontic clinical series populated'
+    // NON-DESTRUCTIVE ADDITIVE MERGE: Keep all existing clinical photos and derivatives, only adding new sample items
+    const newSamplesOnly = sampleSeries.filter(
+      (sample) => !photos.some((p) => p.id === sample.id)
     );
+
+    if (newSamplesOnly.length > 0) {
+      onUpdateCase(
+        {
+          ...orthoCase,
+          photos: [...photos, ...newSamplesOnly],
+        },
+        'LOADED_SAMPLE_DEMO_SERIES',
+        `Non-destructively added ${newSamplesOnly.length} demonstration series items to case`
+      );
+    }
   };
 
   // Helper to render an individual photo slot card ("المربع")
   const renderSlotCard = (slot: StandardSlotDef) => {
     // If activeStageFilter is ALL, look for T0 then T1 then T3; otherwise use exact stage
     const targetStage: TimepointStage = activeStageFilter === 'ALL' ? 'T0_Initial' : activeStageFilter;
-    const photo = findPhotoForSlot(slot, targetStage);
+
+    // Filter slotPhotos strictly based on mediaViewScope
+    const slotPhotos = photos.filter((p) => {
+      const matchSlot =
+        p.category.toLowerCase().trim() === slot.category.toLowerCase().trim() && p.stage === targetStage;
+      if (!matchSlot) return false;
+      const isSample = p.id.startsWith('ph_sample_');
+      if (mediaViewScope === 'clinical') return !isSample;
+      if (mediaViewScope === 'samples') return isSample;
+      return true; // 'all'
+    });
+
+    const activeId = slotActivePhotoId[`${slot.key}_${targetStage}`];
+    const photo =
+      (activeId ? slotPhotos.find((p) => p.id === activeId) : undefined) ||
+      slotPhotos.find((p) => p.parentAssetId) ||
+      slotPhotos.find((p) => !p.id.startsWith('ph_sample_')) ||
+      slotPhotos[0];
     const isDragOver = dragOverSlotKey === `${slot.key}_${targetStage}`;
 
     return (
@@ -740,15 +883,22 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
             </p>
           </div>
 
-          <span
-            className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold shrink-0 ${
-              photo
-                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                : 'bg-slate-100 text-slate-500 border border-slate-200'
-            }`}
-          >
-            {formatTimepointStage(language, targetStage)}
-          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {photo?.id.startsWith('ph_sample_') && (
+              <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300">
+                {isAr ? 'عينة توضيحية' : 'DEMO'}
+              </span>
+            )}
+            <span
+              className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${
+                photo
+                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                  : 'bg-slate-100 text-slate-500 border border-slate-200'
+              }`}
+            >
+              {formatTimepointStage(language, targetStage)}
+            </span>
+          </div>
         </div>
 
         {/* Image Frame / Dropzone Body */}
@@ -761,6 +911,21 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
                   title={photo.integrityError || (photo.integrityStatus === 'CORRUPT' ? 'Corrupt Binary / Checksum Mismatch' : 'Binary File Missing')}
                 >
                   <span>⚠️ {photo.integrityStatus}: {isAr ? 'خطأ سلامة البيانات السريرية' : 'Integrity Error'}</span>
+                </div>
+              )}
+              {photo.parentAssetId && (
+                <div
+                  className="absolute top-2 right-2 z-20 bg-amber-600/90 hover:bg-amber-700 text-white text-[9px] font-bold px-2 py-0.5 rounded shadow flex items-center gap-1 cursor-pointer backdrop-blur-xs transition"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSlotActivePhotoId((prev) => ({
+                      ...prev,
+                      [`${slot.key}_${targetStage}`]: photo.parentAssetId!,
+                    }));
+                  }}
+                  title={isAr ? 'انقر للعودة إلى الصورة الأصلية قبل التعديل' : 'Click to jump back to original master image'}
+                >
+                  <span>✏️ {isAr ? 'نسخة معدلة (عرض الأصل)' : 'Derivative (View Original)'}</span>
                 </div>
               )}
               {photo.dataUrl ? (
@@ -793,6 +958,14 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
                     className="p-2 rounded-lg bg-white/20 hover:bg-white/30 text-white transition-colors"
                   >
                     <ZoomIn className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setImageEditorPhoto(photo)}
+                    title={isAr ? 'محرر الصور المتقدم والتعليق البصري' : 'Clinical Image Editor & Annotator'}
+                    className="p-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
+                  >
+                    <Sparkles className="w-4 h-4" />
                   </button>
                   <button
                     type="button"
@@ -863,6 +1036,44 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
           )}
         </div>
 
+        {/* Multi-Version Selector Toolbar (Original Master vs Edited Derivatives) */}
+        {slotPhotos.length > 1 && (
+          <div className="px-3 py-1.5 bg-slate-100 border-t border-slate-200 flex items-center gap-1.5 overflow-x-auto">
+            <span className="text-[10px] font-bold text-slate-500 shrink-0">
+              {isAr ? 'الإصدارات:' : 'Versions:'}
+            </span>
+            {slotPhotos.map((p, idx) => {
+              const isCurrent = p.id === photo?.id;
+              const isDerivative = Boolean(p.parentAssetId);
+              const label = isDerivative
+                ? (isAr ? `تعديل ${idx}` : `Edit ${idx}`)
+                : (isAr ? 'الأصل' : 'Original');
+
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSlotActivePhotoId((prev) => ({
+                      ...prev,
+                      [`${slot.key}_${targetStage}`]: p.id,
+                    }));
+                  }}
+                  className={`px-2 py-0.5 text-[10px] rounded font-mono font-bold transition shrink-0 ${
+                    isCurrent
+                      ? 'bg-blue-600 text-white shadow-xs ring-1 ring-blue-700'
+                      : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-300'
+                  }`}
+                  title={p.parentAssetId ? `Derivative ID: ${p.id}` : 'Original Master Photo'}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* Card Footer: Metadata & Captions */}
         <div className="p-3 bg-white space-y-1.5 border-t border-slate-100">
           <div className="flex items-center justify-between text-[11px] text-slate-500">
@@ -925,6 +1136,66 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
 
           {/* Global Actions */}
           <div className="flex flex-wrap items-center gap-2">
+            {/* Mode Scope Switcher */}
+            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
+              <button
+                type="button"
+                onClick={() => setMediaViewScope('clinical')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                  mediaViewScope === 'clinical'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-slate-700 hover:text-slate-900'
+                }`}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>{isAr ? 'الصور السريرية' : 'Clinical Photos'}</span>
+                <span
+                  className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                    mediaViewScope === 'clinical' ? 'bg-blue-800 text-white' : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {clinicalPhotosCount}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setMediaViewScope('samples')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                  mediaViewScope === 'samples'
+                    ? 'bg-amber-600 text-white shadow-xs'
+                    : 'text-slate-700 hover:text-slate-900'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{isAr ? 'صور نموذجية (Demo)' : 'Sample Series'}</span>
+                <span
+                  className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                    mediaViewScope === 'samples' ? 'bg-amber-800 text-white' : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {samplePhotosCount}
+                </span>
+              </button>
+            </div>
+
+            {/* Recovery Action for missing baseline clinical photos */}
+            {missingBaselinePhotos.length > 0 && (
+              <button
+                type="button"
+                onClick={handleRestoreClinicalPhotos}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-lg transition-colors min-h-[40px]"
+                title={isAr ? 'استعادة الصور السريرية الأصلية المعتمدة للحالة' : 'Restore Authoritative Clinical Photos'}
+              >
+                <RefreshCw className="w-4 h-4 text-emerald-600" />
+                <span>
+                  {isAr
+                    ? `استعادة الصور السابقة (${missingBaselinePhotos.length})`
+                    : `Restore Clinical Photos (${missingBaselinePhotos.length})`}
+                </span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setShowWebCephImportModal(true)}
@@ -934,14 +1205,25 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
               <span>{isAr ? 'استيراد WebCeph' : 'Import WebCeph'}</span>
             </button>
 
-            <button
-              type="button"
-              onClick={handleLoadSampleSeries}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors min-h-[40px]"
-            >
-              <Sparkles className="w-4 h-4 text-amber-500" />
-              <span>{isAr ? 'تحميل صور نموذجية' : 'Load Sample Series'}</span>
-            </button>
+            {mediaViewScope === 'samples' ? (
+              <button
+                type="button"
+                onClick={handleReturnToClinicalPhotos}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg shadow-xs transition-colors min-h-[40px]"
+              >
+                <Camera className="w-4 h-4 text-cyan-200" />
+                <span>{isAr ? 'العودة للصور السريرية' : 'Return to Clinical'}</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleLoadSampleSeries}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors min-h-[40px]"
+              >
+                <Sparkles className="w-4 h-4 text-amber-500" />
+                <span>{isAr ? 'تحميل صور نموذجية' : 'Load Sample Series'}</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -1011,6 +1293,52 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
           </div>
         </div>
       </div>
+
+      {/* 2B. ACTIVE SAMPLE DEMO MODE NOTIFICATION & RESTORE BANNER */}
+      {mediaViewScope === 'samples' && (
+        <div className="bg-amber-50 border-2 border-amber-300 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-xs animate-in fade-in">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-amber-500 text-white rounded-xl shadow-xs shrink-0">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="text-sm font-bold text-amber-950">
+                  {isAr ? 'وضع عرض الصور النموذجية التوضيحية (Demo Series Active)' : 'Demonstration Sample Series Active'}
+                </h4>
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-200 text-amber-900 border border-amber-400">
+                  DEMO ONLY
+                </span>
+              </div>
+              <p className="text-xs text-amber-800 mt-0.5">
+                {isAr
+                  ? 'أنت تتصفح حالياً الصور التوضيحية النموذجية. صور المريض السريرية الأصلية ونسخ التعديل محفوظة بالكامل وبأمان.'
+                  : 'You are currently viewing standard demonstration photos. Real patient clinical photos and edited derivatives remain safe.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleReturnToClinicalPhotos}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 active:bg-blue-800 rounded-lg shadow-sm transition"
+            >
+              <Camera className="w-4 h-4" />
+              <span>{isAr ? 'العودة للصور السريرية للمريض' : 'Return to Patient Clinical Photos'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleUnloadSamples}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg transition"
+            >
+              <X className="w-3.5 h-3.5 text-slate-500" />
+              <span>{isAr ? 'إخفاء النماذج التوضيحية' : 'Hide Samples'}</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 3. VIEW MODE: STANDARD SLOT GRID */}
       {viewMode === 'grid' && (
@@ -1343,6 +1671,20 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
               </p>
 
               <div className="flex items-center gap-2">
+                {lightboxPhoto.parentAssetId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const parent = photos.find((p) => p.id === lightboxPhoto.parentAssetId);
+                      if (parent) setLightboxPhoto(parent);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold flex items-center gap-1.5 transition"
+                    title={isAr ? 'عرض الصورة الأصلية المصدر' : 'View Source Master Image'}
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>{isAr ? 'عرض الأصل' : 'View Original'}</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -1727,6 +2069,19 @@ export const ClinicalMediaWorkspace: React.FC<ClinicalMediaWorkspaceProps> = ({
           language={language}
           initialStage={activeStageFilter === 'ALL' ? 'T0_Initial' : activeStageFilter}
           onCommitImport={handleCommitWebCephImport}
+        />
+      )}
+
+      {/* 9. CLINICAL IMAGE EDITOR & ANNOTATOR MODAL */}
+      {imageEditorPhoto && (
+        <ClinicalImageEditorModal
+          isOpen={Boolean(imageEditorPhoto)}
+          onClose={() => setImageEditorPhoto(null)}
+          photo={imageEditorPhoto}
+          patient={patient}
+          orthoCase={orthoCase}
+          language={language}
+          onSaveDerivative={handleSaveDerivative}
         />
       )}
     </div>

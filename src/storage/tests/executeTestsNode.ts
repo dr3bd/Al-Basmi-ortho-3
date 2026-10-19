@@ -15,6 +15,7 @@ import { runClinicalUnsavedEditGuardSuite } from './clinicalUnsavedEditGuardSuit
 import { runUX1DataIntegritySuite } from './clinicalCaseDataIntegritySuite.ts';
 import { runDbFoundationRemediationSuite } from './dbFoundationRemediationSuite.ts';
 import { runSqliteBackupRestoreSuite } from './sqliteBackupRestoreSuite.ts';
+import { runClinicalImageEditorForensicSuite } from './clinicalImageEditorForensicSuite.ts';
 import { executeP3DProblemTestSuite } from '../../domain/p3dProblemTestSuite.ts';
 
 // Intercept internal wa-sqlite Emscripten asyncify microtask unwinding during cross-suite module reload
@@ -221,6 +222,20 @@ async function main() {
     `Unsaved Edit Guard Total: ${uegReport.total}, Passed: ${uegReport.passed}, Failed: ${uegReport.failed}, Blocked: ${uegReport.blocked}`
   );
   for (const r of uegReport.results) {
+    console.log(`[${r.status}] ${r.testId} - ${r.name}`);
+    console.log(`       Evidence: ${r.evidence}`);
+    if (r.limitation) {
+      console.log(`       Limitation: ${r.limitation}`);
+    }
+  }
+
+  // 7d. Clinical Image Editor Forensic Suite (Phase CIE-1)
+  console.log('\n=== STARTING CLINICAL IMAGE EDITOR FORENSIC SUITE (CIE-1) ===');
+  const cieReport = await runClinicalImageEditorForensicSuite({ wasmBinary });
+  console.log(
+    `Clinical Image Editor Total: ${cieReport.total}, Passed: ${cieReport.passed}, Failed: ${cieReport.failed}, Blocked: ${cieReport.blocked}`
+  );
+  for (const r of cieReport.results) {
     console.log(`[${r.status}] ${r.testId} - ${r.name}`);
     console.log(`       Evidence: ${r.evidence}`);
     if (r.limitation) {

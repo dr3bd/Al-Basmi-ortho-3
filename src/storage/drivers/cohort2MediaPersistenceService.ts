@@ -92,6 +92,8 @@ export interface CreateMediaAssetParams {
   captionEn?: string;
   captionAr?: string;
   svgType?: string;
+  parentAssetId?: string;
+  editingRecipe?: any;
   userId: string;
   userRole: 'ORTHODONTIST' | 'CLINICAL_ASSISTANT';
   deviceId: string;
@@ -392,6 +394,8 @@ export class Cohort2MediaPersistenceService {
       captionEn: params.captionEn || '',
       captionAr: params.captionAr || '',
       svgType: params.svgType || 'photo_custom',
+      parentAssetId: params.parentAssetId || undefined,
+      editingRecipe: params.editingRecipe || undefined,
     };
 
     const mediaRow: SqliteMediaAssetRow = {
