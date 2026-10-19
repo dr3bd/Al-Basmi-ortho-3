@@ -127,6 +127,18 @@ export const ClinicalStorageProvider: React.FC<ClinicalStorageProviderProps> = (
         }
       }
 
+      // Stage 2: Actively purge legacy competing clinical keys from localStorage
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          window.localStorage.removeItem('albasmi_orth_cases_v1');
+          window.localStorage.removeItem('albasmi_orth_patients_v1');
+          window.localStorage.removeItem('albasmi_orth_p3_sqlite_truth_v1');
+          window.localStorage.removeItem('albasmi_orth_authoritative_sqlite_snapshot_v1');
+        } catch {
+          // Ignore restricted environments
+        }
+      }
+
       // 2. Instantiate WaSqliteStorageAdapter
       // When in CLINICAL mode, allowPreviewEphemeral is strictly false to forbid in-memory fallback.
       const isClinical = effectiveMode === 'CLINICAL';

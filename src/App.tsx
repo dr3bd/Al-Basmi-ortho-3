@@ -605,7 +605,7 @@ export default function App() {
   const [selectedPatientId, setSelectedPatientId] = React.useState<string | null>(null);
   const [caseScope, setCaseScope] = React.useState<'all' | 'clinical' | 'demo'>('all');
 
-  // Clinical SQLite Storage Integration (Phase R2-A, R2-B, R2-C, R2-D, P3-J)
+  // Clinical SQLite Storage Integration (Phase R2-A, R2-B, R2-C, R2-D, P3-J, P3-I)
   const {
     cohort2PatientService,
     cohort2CaseService,
@@ -614,6 +614,7 @@ export default function App() {
     cohort2TreatmentPlanService,
     cohort2MediaService,
     cohort2CephService,
+    cohort2OutcomeService,
     mediaBlobStore,
     deviceInfo,
     status: storageStatus,
@@ -681,8 +682,10 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, []);
 
-  // In-memory display projection of patients (authoritatively loaded from SQLite upon storage readiness)
-  const [patients, setPatients] = React.useState<Patient[]>(INITIAL_PATIENTS);
+  // Authoritative physical SQLite state projections (zero cold-start demo fallback)
+  const [patients, setPatients] = React.useState<Patient[]>([]);
+  const [cases, setCases] = React.useState<OrthodonticCase[]>([]);
+  const [isStorageHydrated, setIsStorageHydrated] = React.useState<boolean>(false);
 
   // Load authoritative patients from SQLite upon storage readiness
   React.useEffect(() => {
@@ -693,16 +696,7 @@ export default function App() {
           const sqliteRows = await cohort2PatientService.listActivePatients();
           if (isMounted) {
             const mapped = (sqliteRows || []).map(mapSqlitePatientToUi);
-            setPatients((prev) => {
-              if (storageMode === 'CLINICAL') {
-                return mapped;
-              }
-              const sqliteIds = new Set(mapped.map((p) => p.id));
-              const remainingDemo = prev.filter(
-                (p) => !sqliteIds.has(p.id) && INITIAL_PATIENTS.some((dp) => dp.id === p.id)
-              );
-              return [...mapped, ...remainingDemo];
-            });
+            setPatients(mapped);
           }
         } catch (err) {
           console.error('Failed to load authoritative patients from SQLite:', err);
@@ -714,15 +708,6 @@ export default function App() {
       isMounted = false;
     };
   }, [storageStatus, cohort2PatientService, storageMode]);
-
-  const [cases, setCases] = React.useState<OrthodonticCase[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.CASES);
-      return saved ? JSON.parse(saved) : INITIAL_CASES;
-    } catch {
-      return INITIAL_CASES;
-    }
-  });
 
   // Load authoritative orthodontic cases, visits, examinations, problems, diagnoses & media from SQLite upon storage readiness
   React.useEffect(() => {
@@ -930,12 +915,16 @@ export default function App() {
             }
 
             setCases((prev) => {
+              if (storageMode === 'CLINICAL') {
+                return mappedCases;
+              }
               const sqliteCaseIds = new Set(mappedCases.map((c) => c.id));
               const remainingDemoCases = prev.filter(
                 (c) => !sqliteCaseIds.has(c.id) && (c.isDemo || INITIAL_CASES.some((dc) => dc.id === c.id))
               );
               return [...mappedCases, ...remainingDemoCases];
             });
+            setIsStorageHydrated(true);
           }
         } catch (err) {
           console.error('Failed to load authoritative cases from SQLite:', err);
@@ -956,6 +945,7 @@ export default function App() {
     cohort2CephService,
     mediaBlobStore,
     patients,
+    storageMode,
   ]);
 
   const [inventory, setInventory] = React.useState<InventoryMaterial[]>(() => {
@@ -993,19 +983,28 @@ export default function App() {
   const [newCaseStartDate, setNewCaseStartDate] = React.useState<string>(() => new Date().toISOString().slice(0, 10));
   const [newCaseChiefComplaintEn, setNewCaseChiefComplaintEn] = React.useState('');
 
-  // Persist non-migrated clinical entities to Local Storage (Patients & Cases are authoritative in SQLite)
+  // Stage 2: Purge legacy competing clinical stores from browser localStorage on startup
   React.useEffect(() => {
     try {
-      // Legacy case isolation: Only store demo cases in localStorage; physical SQLite is SSOT for clinical cases
-      const demoCasesOnly = cases.filter((c) => c.isDemo);
-      localStorage.setItem(STORAGE_KEYS.CASES, JSON.stringify(demoCasesOnly));
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(STORAGE_KEYS.CASES);
+        localStorage.removeItem(STORAGE_KEYS.LEGACY_PATIENTS);
+        localStorage.removeItem('albasmi_orth_p3_sqlite_truth_v1');
+        localStorage.removeItem('albasmi_orth_authoritative_sqlite_snapshot_v1');
+      }
+    } catch {
+      // Ignore in sandboxed iframes
+    }
+  }, []);
+
+  // Persist inventory (Business Module P7) only to localStorage
+  React.useEffect(() => {
+    try {
       localStorage.setItem(STORAGE_KEYS.INVENTORY, JSON.stringify(inventory));
-      localStorage.setItem(STORAGE_KEYS.AUDIT, JSON.stringify(auditLogs));
-      localStorage.setItem(STORAGE_KEYS.SYNC, JSON.stringify(syncQueue));
     } catch {
       // Ignore storage quota errors in sandboxed iframes
     }
-  }, [cases, inventory, auditLogs, syncQueue]);
+  }, [inventory]);
 
   const visiblePatients = React.useMemo(() => {
     if (storageMode === 'CLINICAL') {
@@ -2139,6 +2138,60 @@ export default function App() {
       Boolean(pat?.fullNameAr?.includes(searchQuery))
     );
   });
+
+  // Stage 2 (Requirement 6): Explicit Cold-Start Loading Screen
+  // Eliminates race conditions and prevents premature or demo fallback while SQLite initializes
+  if (storageStatus === 'UNINITIALIZED' || storageStatus === 'INITIALIZING') {
+    return (
+      <div
+        dir={language === 'ar' ? 'rtl' : 'ltr'}
+        className="min-h-screen flex flex-col items-center justify-center bg-slate-50 text-slate-900 p-6"
+      >
+        <div className="max-w-md w-full bg-white rounded-2xl shadow-xl border border-slate-200 p-8 text-center space-y-6">
+          <div className="w-16 h-16 mx-auto rounded-2xl bg-blue-50 border border-blue-200 flex items-center justify-center text-blue-600 shadow-inner">
+            <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-xl font-bold tracking-tight text-slate-900">
+              {language === 'ar' ? 'تهيئة محرك قاعدة البيانات السريرية' : 'Initializing Clinical Persistence'}
+            </h1>
+            <p className="text-xs text-slate-500 font-mono">
+              Al-Basmi Orth · SQLite WASM Authoritative Storage Engine
+            </p>
+          </div>
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-600 space-y-2 text-start">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-slate-700">
+                {language === 'ar' ? 'حالة المحرك السريري:' : 'Engine Status:'}
+              </span>
+              <span className="font-semibold text-blue-700 bg-blue-100/70 px-2 py-0.5 rounded text-[11px]">
+                {storageStatus === 'INITIALIZING'
+                  ? language === 'ar' ? 'جاري التحميل وفحص الجداول...' : 'Initializing...'
+                  : language === 'ar' ? 'في الانتظار' : 'Pending'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-slate-700">
+                {language === 'ar' ? 'المصدر المرجعي للبيانات:' : 'Clinical Authority:'}
+              </span>
+              <span className="font-mono text-slate-800 text-[11px]">Physical SQLite (SCHEMA_FREEZE_v1.0)</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-slate-700">
+                {language === 'ar' ? 'مطابقة التخزين:' : 'Storage Mode:'}
+              </span>
+              <span className="font-mono text-slate-800 text-[11px]">{storageMode}</span>
+            </div>
+          </div>
+          <p className="text-[11px] text-slate-400">
+            {language === 'ar'
+              ? 'يتم التحقق من سلامة الجداول السريرية وعزل البيانات قبل فتح الواجهة...'
+              : 'Verifying relational integrity and isolating persistence boundaries...'}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

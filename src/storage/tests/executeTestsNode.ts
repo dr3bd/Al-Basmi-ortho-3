@@ -17,6 +17,7 @@ import { runDbFoundationRemediationSuite } from './dbFoundationRemediationSuite.
 import { runSqliteBackupRestoreSuite } from './sqliteBackupRestoreSuite.ts';
 import { runClinicalImageEditorForensicSuite } from './clinicalImageEditorForensicSuite.ts';
 import { executeP3DProblemTestSuite } from '../../domain/p3dProblemTestSuite.ts';
+import { runStage2PersistenceUnificationSuite } from './stage2PersistenceUnificationSuite.ts';
 
 // Intercept internal wa-sqlite Emscripten asyncify microtask unwinding during cross-suite module reload
 process.on('unhandledRejection', (reason: any) => {
@@ -276,6 +277,17 @@ async function main() {
     console.log(`       Evidence: ${r.evidence}`);
   }
 
+  // 11. Stage 2 Persistence Authority Unification Suite (STAGE 2)
+  console.log('\n=== STARTING STAGE 2 PERSISTENCE AUTHORITY UNIFICATION SUITE ===');
+  const st2Report = await runStage2PersistenceUnificationSuite({ wasmBinary });
+  console.log(
+    `STAGE 2 UNIFICATION Total: ${st2Report.total}, Passed: ${st2Report.passed}, Failed: ${st2Report.failed}`
+  );
+  for (const r of st2Report.results) {
+    console.log(`[${r.passed ? 'PASS' : 'FAIL'}] ${r.testId} - ${r.name}`);
+    console.log(`       Evidence: ${r.evidence}`);
+  }
+
   console.log('\n=== FINAL SUMMARY BREAKDOWN ===');
   console.log(`Storage Acceptance failedGates: ${report.failedGates}`);
   console.log(`c1Report failed: ${c1Report.total - c1Report.passed}`);
@@ -293,6 +305,7 @@ async function main() {
   console.log(`ux1Report failed: ${ux1Report.failed}`);
   console.log(`dbfReport failed: ${dbfReport.failed}`);
   console.log(`bkReport failed: ${bkReport.failed}`);
+  console.log(`st2Report failed: ${st2Report.failed}`);
 
   const anyFailures =
     report.failedGates > 0 ||
@@ -310,7 +323,8 @@ async function main() {
     uegReport.failed > 0 ||
     ux1Report.failed > 0 ||
     dbfReport.failed > 0 ||
-    bkReport.failed > 0;
+    bkReport.failed > 0 ||
+    st2Report.failed > 0;
   if (anyFailures) {
     console.error('\nOne or more test suites failed.');
     process.exit(1);

@@ -1147,7 +1147,9 @@ export function deserializeAuthoritativeDatabaseSnapshot(
 }
 
 /**
- * Single Authoritative Offline Persistence Store (replaces deprecated albasmi_orth_p3_sqlite_truth_v1).
+/**
+ * Single Authoritative Offline Persistence Store (Isolated In-Memory Test Snapshot Cache).
+ * Stage 2 Mandate: Physical SQLite is the sole SSOT. Zero clinical data in localStorage.
  */
 export class AuthoritativeOfflinePersistenceStore {
   public static readonly STORAGE_KEY = AUTHORITATIVE_SQLITE_STORAGE_KEY;
@@ -1156,19 +1158,19 @@ export class AuthoritativeOfflinePersistenceStore {
   public static loadOrInitialize(): AuthoritativeRelationalDatabaseState {
     try {
       if (typeof localStorage !== 'undefined') {
-        // Clean up forbidden parallel P3 key if present
+        // Stage 2: Actively purge legacy competing keys from browser localStorage
         if (localStorage.getItem(DEPRECATED_P3_PARALLEL_STORAGE_KEY) !== null) {
           localStorage.removeItem(DEPRECATED_P3_PARALLEL_STORAGE_KEY);
         }
-        const raw = localStorage.getItem(AUTHORITATIVE_SQLITE_STORAGE_KEY);
-        if (raw) {
-          return deserializeAuthoritativeDatabaseSnapshot(raw);
+        if (localStorage.getItem(AUTHORITATIVE_SQLITE_STORAGE_KEY) !== null) {
+          localStorage.removeItem(AUTHORITATIVE_SQLITE_STORAGE_KEY);
         }
-      } else if (this.memoryFallbackSnapshot) {
+      }
+      if (this.memoryFallbackSnapshot) {
         return deserializeAuthoritativeDatabaseSnapshot(this.memoryFallbackSnapshot);
       }
     } catch {
-      // Fallback to fresh seeded authoritative DB if localStorage is unavailable
+      // Fallback to fresh seeded authoritative DB
     }
     return createSeededAuthoritativeDatabase();
   }
@@ -1178,16 +1180,21 @@ export class AuthoritativeOfflinePersistenceStore {
     this.memoryFallbackSnapshot = serialized;
     try {
       if (typeof localStorage !== 'undefined') {
+        // Enforce zero competing writes: Clean up any old keys, never set new ones in localStorage
         localStorage.removeItem(DEPRECATED_P3_PARALLEL_STORAGE_KEY);
-        localStorage.setItem(AUTHORITATIVE_SQLITE_STORAGE_KEY, serialized);
+        localStorage.removeItem(AUTHORITATIVE_SQLITE_STORAGE_KEY);
       }
     } catch {
-      // Ignore storage quota restrictions in sandboxed environments
+      // Ignore in restricted environments
     }
   }
 
   public static save(db: AuthoritativeRelationalDatabaseState): void {
     this.saveCommitSnapshot(db);
+  }
+
+  public static clearMemoryCache(): void {
+    this.memoryFallbackSnapshot = null;
   }
 }
 

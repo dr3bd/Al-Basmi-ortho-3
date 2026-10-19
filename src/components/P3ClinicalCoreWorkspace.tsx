@@ -50,7 +50,6 @@ import {
   P3ExecutionContext,
 } from '../domain/p3ClinicalCoreService';
 import {
-  AuthoritativeOfflinePersistenceStore,
   AuthoritativeRelationalDatabaseState,
 } from '../domain/p2eAndP2fPipelineAndQuery';
 import {
@@ -58,26 +57,8 @@ import {
   P3CClinicalExaminationQueryService,
 } from '../domain/p3cExaminationService';
 import { executeP3UnifiedForensicBatch } from '../domain/p3ForensicTestSuite';
-
-function loadPersistedP3Database(): AuthoritativeRelationalDatabaseState {
-  const loaded = AuthoritativeOfflinePersistenceStore.loadOrInitialize();
-  // Ensure P3 canonical seed records exist if loading from fresh/P2 snapshot
-  if (!loaded.patients.has('pat-p3-001')) {
-    const seededP3 = createSeededP3ClinicalCoreDatabase();
-    seededP3.patients.forEach((v, k) => loaded.patients.set(k, v));
-    seededP3.orthodontic_cases.forEach((v, k) => loaded.orthodontic_cases.set(k, v));
-    seededP3.clinical_examinations.forEach((v, k) => loaded.clinical_examinations.set(k, v));
-    seededP3.clinical_findings.forEach((v, k) => loaded.clinical_findings.set(k, v));
-    seededP3.tooth_findings.forEach((v, k) => loaded.tooth_findings.set(k, v));
-    seededP3.arch_measurements.forEach((v, k) => loaded.arch_measurements.set(k, v));
-    AuthoritativeOfflinePersistenceStore.saveCommitSnapshot(loaded);
-  }
-  return loaded;
-}
-
-function savePersistedP3Database(db: AuthoritativeRelationalDatabaseState): void {
-  AuthoritativeOfflinePersistenceStore.saveCommitSnapshot(db);
-}
+import { useClinicalStorage } from '../storage/context/ClinicalStorageContext';
+import { SqliteP3BridgeService } from '../storage/services/sqliteP3BridgeService';
 
 interface P3ClinicalCoreWorkspaceProps {
   language: LanguageMode;
@@ -88,7 +69,31 @@ export const P3ClinicalCoreWorkspace: React.FC<P3ClinicalCoreWorkspaceProps> = (
   language,
   isOnline,
 }) => {
-  const [db, setDb] = React.useState<P3ClinicalCoreDatabase>(() => loadPersistedP3Database());
+  const { adapter, status: storageStatus, deviceInfo } = useClinicalStorage();
+  const [db, setDb] = React.useState<P3ClinicalCoreDatabase>(() => createSeededP3ClinicalCoreDatabase());
+  const [isSqliteHydrated, setIsSqliteHydrated] = React.useState<boolean>(false);
+
+  // Stage 2: Hydrate authoritative clinical records directly from physical SQLite upon storage readiness
+  React.useEffect(() => {
+    let isMounted = true;
+    async function hydrateFromPhysicalSqlite() {
+      if (storageStatus === 'READY' && adapter) {
+        try {
+          const loaded = await SqliteP3BridgeService.hydrateFromSqlite(adapter);
+          if (isMounted) {
+            setDb(loaded);
+            setIsSqliteHydrated(true);
+          }
+        } catch (err) {
+          console.error('Failed to hydrate P3 workspace from physical SQLite:', err);
+        }
+      }
+    }
+    hydrateFromPhysicalSqlite();
+    return () => {
+      isMounted = false;
+    };
+  }, [storageStatus, adapter]);
   const [activeSubPhase, setActiveSubPhase] = React.useState<'P3A' | 'P3B' | 'P3C' | 'FORENSIC_60'>('P3A');
 
   // Query filters
@@ -153,7 +158,7 @@ export const P3ClinicalCoreWorkspace: React.FC<P3ClinicalCoreWorkspaceProps> = (
     operation_id: `${prefix}-${Date.now()}`,
     user_id: 'usr-ortho-01',
     user_role: 'ORTHODONTIST',
-    device_id: 'dev-ipad-pro-clinic-01',
+    device_id: deviceInfo?.deviceId || 'dev-ipad-pro-clinic-01',
     timestamp: new Date().toISOString(),
     is_online: isOnline,
   });
@@ -161,7 +166,12 @@ export const P3ClinicalCoreWorkspace: React.FC<P3ClinicalCoreWorkspaceProps> = (
   const commitDbUpdate = (nextDb: P3ClinicalCoreDatabase) => {
     const cloned = cloneP3ClinicalCoreDatabase(nextDb);
     setDb(cloned);
-    savePersistedP3Database(cloned);
+    // Stage 2: Persist directly to physical SQLite; zero localStorage writes
+    if (adapter && storageStatus === 'READY') {
+      SqliteP3BridgeService.persistToSqlite(adapter, cloned).catch((err) => {
+        console.error('Failed to commit P3 mutation to physical SQLite:', err);
+      });
+    }
   };
 
   // Authoritative Query Reads
