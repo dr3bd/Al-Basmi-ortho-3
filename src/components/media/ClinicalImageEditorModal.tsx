@@ -19,11 +19,16 @@ import {
   CheckCircle2,
   AlertTriangle,
   Eye,
+  EyeOff,
   Trash2,
   Sparkles,
   ShieldAlert,
   Move,
   Maximize2,
+  SeparatorVertical,
+  SeparatorHorizontal,
+  Compass,
+  RefreshCw,
 } from 'lucide-react';
 import {
   ApprovedImageDerivative,
@@ -36,6 +41,11 @@ import {
   OrthodonticCase,
   Patient,
 } from '../../types/orthodontics';
+import {
+  applyClinicalImageAdjustments,
+  createVerticalReferenceGeometry,
+  createHorizontalReferenceGeometry,
+} from '../../utils/imageAdjustments';
 
 export interface ClinicalImageEditorModalProps {
   isOpen: boolean;
@@ -115,6 +125,18 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
 
   // Comparison State
   const [showOriginalComparison, setShowOriginalComparison] = React.useState<boolean>(false);
+
+  // Orthodontic Reference Line Drag State
+  const [refLineDragging, setRefLineDragging] = React.useState<{
+    annotationId: string;
+    handle: 'P1' | 'P2' | 'CENTER';
+    startX: number;
+    startY: number;
+    origX1: number;
+    origY1: number;
+    origX2: number;
+    origY2: number;
+  } | null>(null);
 
   // Saving / Async State
   const [isSaving, setIsSaving] = React.useState<boolean>(false);
@@ -340,11 +362,6 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
       ctx.save();
       ctx.clearRect(0, 0, targetW, targetH);
 
-      // Apply Filter Effects
-      let filterStr = `brightness(${transform.brightness}%) contrast(${transform.contrast}%) saturate(${transform.saturation}%)`;
-      if (transform.grayscale) filterStr += ' grayscale(100%)';
-      ctx.filter = filterStr;
-
       // Center and Transform
       ctx.translate(targetW / 2, targetH / 2);
       ctx.rotate((transform.rotation * Math.PI) / 180);
@@ -361,25 +378,16 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
         sourceW,
         sourceH
       );
-
-      // Apply Sharpness algorithm if requested (> 0)
-      if (transform.sharpness > 0 && targetW > 0 && targetH > 0) {
-        try {
-          const imgData = ctx.getImageData(0, 0, targetW, targetH);
-          const pixels = imgData.data;
-          const factor = (transform.sharpness / 100) * 0.5;
-          for (let i = 0; i < pixels.length; i += 4) {
-            pixels[i] = Math.min(255, Math.max(0, pixels[i] + (pixels[i] - 128) * factor));
-            pixels[i + 1] = Math.min(255, Math.max(0, pixels[i + 1] + (pixels[i + 1] - 128) * factor));
-            pixels[i + 2] = Math.min(255, Math.max(0, pixels[i + 2] + (pixels[i + 2] - 128) * factor));
-          }
-          ctx.putImageData(imgData, 0, 0);
-        } catch {
-          // Fall through if getImageData fails due to cross-origin
-        }
-      }
-
       ctx.restore();
+
+      // Apply deterministic, non-cumulative clinical adjustments
+      try {
+        const imgData = ctx.getImageData(0, 0, targetW, targetH);
+        applyClinicalImageAdjustments(imgData, transform);
+        ctx.putImageData(imgData, 0, 0);
+      } catch {
+        // Fall through if getImageData fails due to cross-origin
+      }
     };
     img.src = photo.dataUrl;
   }, [isOpen, photo, transform]);
@@ -393,6 +401,68 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
     if (activeAnnotationTool === 'text') {
       setPendingTextPos(pos);
       setTextInputPrompt('');
+      return;
+    }
+
+    if (activeAnnotationTool === 'vertical_reference') {
+      const geom = createVerticalReferenceGeometry(pos.x, 50, 90, 0);
+      const newItem: ImageAnnotationItem = {
+        id: `ann_vref_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        type: 'vertical_reference',
+        color: annotationColor,
+        strokeWidth: annotationStrokeWidth,
+        x1: geom.x1,
+        y1: geom.y1,
+        x2: geom.x2,
+        y2: geom.y2,
+        angle: 0,
+        label: isAr ? 'خط المنتصف الرأسي' : 'Facial Midline',
+        isUncalibrated: true,
+      };
+      const nextAnnotations = [...annotations, newItem];
+      setAnnotations(nextAnnotations);
+      setSelectedAnnotationId(newItem.id);
+      setRefLineDragging({
+        annotationId: newItem.id,
+        handle: 'CENTER',
+        startX: pos.x,
+        startY: pos.y,
+        origX1: geom.x1,
+        origY1: geom.y1,
+        origX2: geom.x2,
+        origY2: geom.y2,
+      });
+      return;
+    }
+
+    if (activeAnnotationTool === 'horizontal_reference') {
+      const geom = createHorizontalReferenceGeometry(50, pos.y, 90, 0);
+      const newItem: ImageAnnotationItem = {
+        id: `ann_href_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        type: 'horizontal_reference',
+        color: annotationColor,
+        strokeWidth: annotationStrokeWidth,
+        x1: geom.x1,
+        y1: geom.y1,
+        x2: geom.x2,
+        y2: geom.y2,
+        angle: 0,
+        label: isAr ? 'الخط المرجعي الأفقي' : 'Horizontal Guide',
+        isUncalibrated: true,
+      };
+      const nextAnnotations = [...annotations, newItem];
+      setAnnotations(nextAnnotations);
+      setSelectedAnnotationId(newItem.id);
+      setRefLineDragging({
+        annotationId: newItem.id,
+        handle: 'CENTER',
+        startX: pos.x,
+        startY: pos.y,
+        origX1: geom.x1,
+        origY1: geom.y1,
+        origX2: geom.x2,
+        origY2: geom.y2,
+      });
       return;
     }
 
@@ -418,9 +488,57 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
     }
   };
 
+  const startRefHandleDrag = (
+    e: React.PointerEvent,
+    annotationId: string,
+    handle: 'P1' | 'P2' | 'CENTER',
+    ann: ImageAnnotationItem
+  ) => {
+    e.stopPropagation();
+    setSelectedAnnotationId(annotationId);
+    const pos = getPointerPos(e);
+    setRefLineDragging({
+      annotationId,
+      handle,
+      startX: pos.x,
+      startY: pos.y,
+      origX1: ann.x1 ?? 0,
+      origY1: ann.y1 ?? 0,
+      origX2: ann.x2 ?? 100,
+      origY2: ann.y2 ?? 100,
+    });
+  };
+
   const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     if (cropHandleDragging) {
       handleCropPointerMove(e);
+      return;
+    }
+    if (refLineDragging) {
+      const pos = getPointerPos(e);
+      const dx = pos.x - refLineDragging.startX;
+      const dy = pos.y - refLineDragging.startY;
+      setAnnotations((prev) =>
+        prev.map((ann) => {
+          if (ann.id !== refLineDragging.annotationId) return ann;
+          if (refLineDragging.handle === 'CENTER') {
+            const newX1 = Math.max(0, Math.min(100, refLineDragging.origX1 + dx));
+            const newY1 = Math.max(0, Math.min(100, refLineDragging.origY1 + dy));
+            const newX2 = Math.max(0, Math.min(100, refLineDragging.origX2 + dx));
+            const newY2 = Math.max(0, Math.min(100, refLineDragging.origY2 + dy));
+            return { ...ann, x1: newX1, y1: newY1, x2: newX2, y2: newY2 };
+          } else if (refLineDragging.handle === 'P1') {
+            const newX1 = Math.max(0, Math.min(100, pos.x));
+            const newY1 = Math.max(0, Math.min(100, pos.y));
+            return { ...ann, x1: newX1, y1: newY1 };
+          } else if (refLineDragging.handle === 'P2') {
+            const newX2 = Math.max(0, Math.min(100, pos.x));
+            const newY2 = Math.max(0, Math.min(100, pos.y));
+            return { ...ann, x2: newX2, y2: newY2 };
+          }
+          return ann;
+        })
+      );
       return;
     }
     if (!isDrawingRef.current || activeTab !== 'annotate') return;
@@ -467,6 +585,11 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
   const handlePointerUp = () => {
     if (cropHandleDragging) {
       handleCropPointerUp();
+      return;
+    }
+    if (refLineDragging) {
+      setRefLineDragging(null);
+      pushState(transform, annotations);
       return;
     }
     if (!isDrawingRef.current) return;
@@ -559,10 +682,6 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
       exportCanvas.height = finalH;
 
       ctx.save();
-      let filterStr = `brightness(${transform.brightness}%) contrast(${transform.contrast}%) saturate(${transform.saturation}%)`;
-      if (transform.grayscale) filterStr += ' grayscale(100%)';
-      ctx.filter = filterStr;
-
       ctx.translate(finalW / 2, finalH / 2);
       ctx.rotate((transform.rotation * Math.PI) / 180);
       ctx.scale(transform.flipH ? -1 : 1, transform.flipV ? -1 : 1);
@@ -580,12 +699,24 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
       );
       ctx.restore();
 
+      // Apply deterministic, non-cumulative clinical enhancements to exported pixels
+      try {
+        const exportImgData = ctx.getImageData(0, 0, finalW, finalH);
+        applyClinicalImageAdjustments(exportImgData, transform);
+        ctx.putImageData(exportImgData, 0, 0);
+      } catch (err) {
+        console.warn('Failed to apply pixel adjustments during derivative export:', err);
+      }
+
       // Draw Vector Annotations directly onto Export Canvas
       annotations.forEach((ann) => {
+        // Skip hidden annotations from final clinical derivative
+        if (ann.isHidden) return;
+
         ctx.save();
         ctx.strokeStyle = ann.color;
         ctx.fillStyle = ann.color;
-        ctx.lineWidth = (ann.strokeWidth / 100) * Math.min(finalW, finalH);
+        ctx.lineWidth = Math.max(1, (ann.strokeWidth / 100) * Math.min(finalW, finalH));
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
 
@@ -597,6 +728,27 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
             if (idx === 0) ctx.moveTo(px, py);
             else ctx.lineTo(px, py);
           });
+          ctx.stroke();
+        } else if ((ann.type === 'vertical_reference' || ann.type === 'horizontal_reference') && ann.x1 !== undefined && ann.y1 !== undefined && ann.x2 !== undefined && ann.y2 !== undefined) {
+          const x1 = (ann.x1 / 100) * finalW;
+          const y1 = (ann.y1 / 100) * finalH;
+          const x2 = (ann.x2 / 100) * finalW;
+          const y2 = (ann.y2 / 100) * finalH;
+
+          // Draw main reference guide line
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+
+          // Terminal crosshair perpendicular tick marks
+          const angle = Math.atan2(y2 - y1, x2 - x1);
+          const tickLen = Math.max(12, ctx.lineWidth * 2.5);
+          ctx.beginPath();
+          ctx.moveTo(x1 - tickLen * Math.sin(angle), y1 + tickLen * Math.cos(angle));
+          ctx.lineTo(x1 + tickLen * Math.sin(angle), y1 - tickLen * Math.cos(angle));
+          ctx.moveTo(x2 - tickLen * Math.sin(angle), y2 + tickLen * Math.cos(angle));
+          ctx.lineTo(x2 + tickLen * Math.sin(angle), y2 - tickLen * Math.cos(angle));
           ctx.stroke();
         } else if (ann.type === 'line' && ann.x1 !== undefined && ann.y1 !== undefined && ann.x2 !== undefined && ann.y2 !== undefined) {
           ctx.beginPath();
@@ -860,6 +1012,182 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                           }}
                           className={isSelected ? 'filter drop-shadow-[0_0_3px_rgba(255,255,255,0.8)] cursor-pointer' : 'cursor-pointer'}
                         />
+                      );
+                    } else if (
+                      (ann.type === 'vertical_reference' || ann.type === 'horizontal_reference') &&
+                      ann.x1 !== undefined &&
+                      ann.y1 !== undefined &&
+                      ann.x2 !== undefined &&
+                      ann.y2 !== undefined
+                    ) {
+                      const isV = ann.type === 'vertical_reference';
+                      const angleDeg = isV
+                        ? Math.atan2(ann.x2 - ann.x1, ann.y2 - ann.y1) * (180 / Math.PI)
+                        : Math.atan2(ann.y2 - ann.y1, ann.x2 - ann.x1) * (180 / Math.PI);
+                      const midX = (ann.x1 + ann.x2) / 2;
+                      const midY = (ann.y1 + ann.y2) / 2;
+
+                      // Terminal crosshair perpendicular ticks
+                      const angleRad = Math.atan2(ann.y2 - ann.y1, ann.x2 - ann.x1);
+                      const tickLen = 2.5;
+                      const tdx = tickLen * Math.sin(angleRad);
+                      const tdy = tickLen * Math.cos(angleRad);
+
+                      return (
+                        <g
+                          key={ann.id}
+                          className="cursor-pointer"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedAnnotationId(ann.id);
+                          }}
+                        >
+                          {/* Guideline shadow for high visibility on light/dark backgrounds */}
+                          <line
+                            x1={ann.x1}
+                            y1={ann.y1}
+                            x2={ann.x2}
+                            y2={ann.y2}
+                            stroke="#000000"
+                            strokeWidth={(ann.strokeWidth / 10) + 0.3}
+                            strokeOpacity={0.6}
+                            strokeLinecap="round"
+                          />
+
+                          {/* Primary Reference Line */}
+                          <line
+                            x1={ann.x1}
+                            y1={ann.y1}
+                            x2={ann.x2}
+                            y2={ann.y2}
+                            stroke={ann.color}
+                            strokeWidth={ann.strokeWidth / 10}
+                            strokeDasharray={ann.isHidden ? '2,2' : undefined}
+                            opacity={ann.isHidden ? 0.35 : 1}
+                            strokeLinecap="round"
+                          />
+
+                          {/* Perpendicular Terminal Crosshairs */}
+                          {!ann.isHidden && (
+                            <>
+                              <line
+                                x1={ann.x1 - tdx}
+                                y1={ann.y1 + tdy}
+                                x2={ann.x1 + tdx}
+                                y2={ann.y1 - tdy}
+                                stroke={ann.color}
+                                strokeWidth={ann.strokeWidth / 10}
+                                strokeLinecap="round"
+                              />
+                              <line
+                                x1={ann.x2 - tdx}
+                                y1={ann.y2 + tdy}
+                                x2={ann.x2 + tdx}
+                                y2={ann.y2 - tdy}
+                                stroke={ann.color}
+                                strokeWidth={ann.strokeWidth / 10}
+                                strokeLinecap="round"
+                              />
+                            </>
+                          )}
+
+                          {/* Invisible wide hit area for full-line dragging */}
+                          <line
+                            x1={ann.x1}
+                            y1={ann.y1}
+                            x2={ann.x2}
+                            y2={ann.y2}
+                            stroke="transparent"
+                            strokeWidth={6}
+                            onPointerDown={(e) => startRefHandleDrag(e, ann.id, 'CENTER', ann)}
+                          />
+
+                          {/* Interactive Handles when Selected */}
+                          {isSelected && (
+                            <>
+                              {/* Center Move Handle */}
+                              <circle
+                                cx={midX}
+                                cy={midY}
+                                r={2.0}
+                                fill={ann.color}
+                                stroke="#ffffff"
+                                strokeWidth={0.5}
+                                className="cursor-move shadow-md"
+                              />
+                              {/* Large touch area for iPad / Apple Pencil */}
+                              <circle
+                                cx={midX}
+                                cy={midY}
+                                r={5.0}
+                                fill="transparent"
+                                className="cursor-move"
+                                onPointerDown={(e) => startRefHandleDrag(e, ann.id, 'CENTER', ann)}
+                              />
+
+                              {/* P1 Endpoint Tilt Handle */}
+                              <circle
+                                cx={ann.x1}
+                                cy={ann.y1}
+                                r={1.8}
+                                fill="#ffffff"
+                                stroke={ann.color}
+                                strokeWidth={0.5}
+                                className="cursor-crosshair"
+                              />
+                              <circle
+                                cx={ann.x1}
+                                cy={ann.y1}
+                                r={5.0}
+                                fill="transparent"
+                                className="cursor-crosshair"
+                                onPointerDown={(e) => startRefHandleDrag(e, ann.id, 'P1', ann)}
+                              />
+
+                              {/* P2 Endpoint Tilt Handle */}
+                              <circle
+                                cx={ann.x2}
+                                cy={ann.y2}
+                                r={1.8}
+                                fill="#ffffff"
+                                stroke={ann.color}
+                                strokeWidth={0.5}
+                                className="cursor-crosshair"
+                              />
+                              <circle
+                                cx={ann.x2}
+                                cy={ann.y2}
+                                r={5.0}
+                                fill="transparent"
+                                className="cursor-crosshair"
+                                onPointerDown={(e) => startRefHandleDrag(e, ann.id, 'P2', ann)}
+                              />
+
+                              {/* Clinical Angle Badge */}
+                              <rect
+                                x={Math.min(78, Math.max(2, midX + 2.5))}
+                                y={Math.min(94, Math.max(2, midY - 3.5))}
+                                width={19}
+                                height={4.2}
+                                rx={1}
+                                fill="#0f172a"
+                                fillOpacity={0.9}
+                                stroke={ann.color}
+                                strokeWidth={0.3}
+                              />
+                              <text
+                                x={Math.min(78, Math.max(2, midX + 3.2))}
+                                y={Math.min(94, Math.max(2, midY - 0.7))}
+                                fill="#ffffff"
+                                fontSize="2.4"
+                                fontFamily="monospace"
+                                fontWeight="bold"
+                              >
+                                {isV ? 'V-MID' : 'H-REF'}: {angleDeg.toFixed(1)}°
+                              </text>
+                            </>
+                          )}
+                        </g>
                       );
                     } else if (ann.type === 'line' && ann.x1 !== undefined && ann.y1 !== undefined && ann.x2 !== undefined && ann.y2 !== undefined) {
                       return (
@@ -1257,6 +1585,24 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
               {/* TAB 2: ADJUSTMENTS CONTROLS */}
               {activeTab === 'adjustments' && (
                 <div className="space-y-4">
+                  <div className="flex items-center justify-between pb-1 border-b border-slate-800">
+                    <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                      {isAr ? 'معالجة الصورة السريرية' : 'Image Adjustments'}
+                    </span>
+                    <button
+                      onClick={() =>
+                        pushState(
+                          { ...transform, brightness: 100, contrast: 100, saturation: 100, grayscale: false, sharpness: 0 },
+                          annotations
+                        )
+                      }
+                      className="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 transition"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>{isAr ? 'إعادة ضبط' : 'Reset Neutral'}</span>
+                    </button>
+                  </div>
+
                   {/* Brightness */}
                   <div>
                     <div className="flex items-center justify-between text-xs mb-1">
@@ -1271,7 +1617,8 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                       min="20"
                       max="180"
                       value={transform.brightness}
-                      onChange={(e) => pushState({ ...transform, brightness: Number(e.target.value) }, annotations)}
+                      onChange={(e) => setTransform((prev) => ({ ...prev, brightness: Number(e.target.value) }))}
+                      onPointerUp={() => pushState(transform, annotations)}
                       className="w-full accent-blue-500 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer"
                     />
                   </div>
@@ -1290,7 +1637,8 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                       min="20"
                       max="180"
                       value={transform.contrast}
-                      onChange={(e) => pushState({ ...transform, contrast: Number(e.target.value) }, annotations)}
+                      onChange={(e) => setTransform((prev) => ({ ...prev, contrast: Number(e.target.value) }))}
+                      onPointerUp={() => pushState(transform, annotations)}
                       className="w-full accent-blue-500 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer"
                     />
                   </div>
@@ -1298,7 +1646,10 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                   {/* Saturation */}
                   <div>
                     <div className="flex items-center justify-between text-xs mb-1">
-                      <span className="text-slate-300">{isAr ? 'التشبع (Saturation)' : 'Saturation'}</span>
+                      <span className="text-slate-300 flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-pink-400" />
+                        {isAr ? 'التشبع (Saturation)' : 'Saturation'}
+                      </span>
                       <span className="font-mono text-slate-400">{transform.saturation}%</span>
                     </div>
                     <input
@@ -1306,7 +1657,8 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                       min="0"
                       max="200"
                       value={transform.saturation}
-                      onChange={(e) => pushState({ ...transform, saturation: Number(e.target.value) }, annotations)}
+                      onChange={(e) => setTransform((prev) => ({ ...prev, saturation: Number(e.target.value) }))}
+                      onPointerUp={() => pushState(transform, annotations)}
                       className="w-full accent-blue-500 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer"
                     />
                   </div>
@@ -1314,7 +1666,10 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                   {/* Sharpness */}
                   <div>
                     <div className="flex items-center justify-between text-xs mb-1">
-                      <span className="text-slate-300">{isAr ? 'الحدة (Sharpness)' : 'Sharpness'}</span>
+                      <span className="text-slate-300 flex items-center gap-1.5">
+                        <Compass className="w-3.5 h-3.5 text-emerald-400" />
+                        {isAr ? 'الحدة (Sharpness)' : 'Sharpness'}
+                      </span>
                       <span className="font-mono text-slate-400">{transform.sharpness}%</span>
                     </div>
                     <input
@@ -1322,16 +1677,17 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                       min="0"
                       max="100"
                       value={transform.sharpness}
-                      onChange={(e) => pushState({ ...transform, sharpness: Number(e.target.value) }, annotations)}
+                      onChange={(e) => setTransform((prev) => ({ ...prev, sharpness: Number(e.target.value) }))}
+                      onPointerUp={() => pushState(transform, annotations)}
                       className="w-full accent-blue-500 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer"
                     />
                   </div>
 
                   {/* Grayscale Toggle */}
-                  <div className="pt-2">
-                    <label className="flex items-center justify-between p-3 bg-slate-900 rounded-xl border border-slate-800 cursor-pointer">
+                  <div className="pt-1">
+                    <label className="flex items-center justify-between p-3 bg-slate-900 rounded-xl border border-slate-800 cursor-pointer hover:border-slate-700 transition">
                       <span className="text-xs font-semibold text-slate-200">
-                        {isAr ? 'تحويل للرمادي (Grayscale)' : 'Grayscale Mode'}
+                        {isAr ? 'تحويل للرمادي (Clinical Monochrome)' : 'Clinical Monochrome (Grayscale)'}
                       </span>
                       <input
                         type="checkbox"
@@ -1347,25 +1703,81 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
               {/* TAB 3: ANNOTATION TOOLS */}
               {activeTab === 'annotate' && (
                 <div className="space-y-4">
+                  {/* Clinical Safety Disclaimer Banner */}
+                  <div className="p-2.5 bg-amber-950/40 border border-amber-800/50 rounded-xl flex items-start gap-2 text-[11px] text-amber-300">
+                    <ShieldAlert className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+                    <div className="leading-tight">
+                      <span className="font-bold block mb-0.5">
+                        {isAr ? 'دلائل مرجعية سريرية غير معايرة' : 'Visual Clinical Reference Guides'}
+                      </span>
+                      <span>
+                        {isAr
+                          ? 'خطوط المحاذاة للمقارنة البصرية لخط المنتصف والمستوى الإطباقي. لا تحل محل التشخيص السريري ولا تقدم قياسات آلية.'
+                          : 'Advisory visual guides for facial midline, occlusal cant & interpupillary alignment. Does not provide automatic skeletal diagnosis.'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Orthodontic Reference Line Tools */}
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2 flex items-center justify-between">
+                      <span>{isAr ? 'الخطوط المرجعية التقويمية' : 'Orthodontic Reference Lines'}</span>
+                      <span className="text-[10px] text-cyan-400 font-normal">Advisory Guides</span>
+                    </h3>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => setActiveAnnotationTool('vertical_reference')}
+                        className={`p-2.5 rounded-xl text-xs flex flex-col items-center gap-1.5 border transition ${
+                          activeAnnotationTool === 'vertical_reference'
+                            ? 'bg-cyan-600/30 border-cyan-400 text-cyan-200 shadow-lg shadow-cyan-900/30'
+                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
+                        }`}
+                      >
+                        <SeparatorVertical className="w-5 h-5 text-cyan-400" />
+                        <span className="font-semibold text-center leading-tight">
+                          {isAr ? 'خط المنتصف الرأسي' : 'Vertical Midline'}
+                        </span>
+                        <span className="text-[10px] text-slate-400">Facial Midline Guide</span>
+                      </button>
+
+                      <button
+                        onClick={() => setActiveAnnotationTool('horizontal_reference')}
+                        className={`p-2.5 rounded-xl text-xs flex flex-col items-center gap-1.5 border transition ${
+                          activeAnnotationTool === 'horizontal_reference'
+                            ? 'bg-cyan-600/30 border-cyan-400 text-cyan-200 shadow-lg shadow-cyan-900/30'
+                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
+                        }`}
+                      >
+                        <SeparatorHorizontal className="w-5 h-5 text-cyan-400" />
+                        <span className="font-semibold text-center leading-tight">
+                          {isAr ? 'الخط المرجعي الأفقي' : 'Horizontal Guide'}
+                        </span>
+                        <span className="text-[10px] text-slate-400">Occlusal / Bipupillary</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Clinical Drawing & Markup Tools */}
                   <div>
                     <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
-                      {isAr ? 'أدوات الرسم والتعليم' : 'Drawing Tools'}
+                      {isAr ? 'أدوات الرسم والتأشير' : 'Clinical Drawing & Markup'}
                     </h3>
                     <div className="grid grid-cols-3 gap-1.5">
                       {[
-                        { id: 'freehand', label: isAr ? 'حر' : 'Freehand', icon: PenTool },
-                        { id: 'line', label: isAr ? 'خط' : 'Line', icon: Minus },
+                        { id: 'freehand', label: isAr ? 'قلم حر' : 'Freehand Pen', icon: PenTool },
+                        { id: 'line', label: isAr ? 'خط مستقيم' : 'Line', icon: Minus },
                         { id: 'arrow', label: isAr ? 'سهم' : 'Arrow', icon: ArrowRight },
                         { id: 'rectangle', label: isAr ? 'مستطيل' : 'Rectangle', icon: Square },
                         { id: 'circle', label: isAr ? 'دائرة' : 'Circle', icon: CircleIcon },
-                        { id: 'text', label: isAr ? 'نص' : 'Text', icon: Type },
+                        { id: 'text', label: isAr ? 'نص سريري' : 'Text Label', icon: Type },
+                        { id: 'select', label: isAr ? 'تحديد وتحريك' : 'Select / Move', icon: Move },
                       ].map((tool) => {
                         const IconComponent = tool.icon;
                         const isActive = activeAnnotationTool === tool.id;
                         return (
                           <button
                             key={tool.id}
-                            onClick={() => setActiveAnnotationTool(tool.id as ImageAnnotationType)}
+                            onClick={() => setActiveAnnotationTool(tool.id as ImageAnnotationType | 'select')}
                             className={`p-2 rounded-xl text-xs flex flex-col items-center gap-1 border transition ${
                               isActive
                                 ? 'bg-blue-600/30 border-blue-500 text-blue-300'
@@ -1373,23 +1785,31 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                             }`}
                           >
                             <IconComponent className="w-4 h-4" />
-                            <span>{tool.label}</span>
+                            <span className="text-[11px]">{tool.label}</span>
                           </button>
                         );
                       })}
                     </div>
                   </div>
 
-                  {/* Color Palette */}
+                  {/* Stroke Color Palette */}
                   <div>
                     <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
-                      {isAr ? 'لون الرسم' : 'Stroke Color'}
+                      {isAr ? 'لون الخط' : 'Stroke Color'}
                     </h3>
                     <div className="flex items-center gap-2">
                       {COLOR_PRESETS.map((cp) => (
                         <button
                           key={cp.hex}
-                          onClick={() => setAnnotationColor(cp.hex)}
+                          onClick={() => {
+                            setAnnotationColor(cp.hex);
+                            if (selectedAnnotationId) {
+                              const updated = annotations.map((a) =>
+                                a.id === selectedAnnotationId ? { ...a, color: cp.hex } : a
+                              );
+                              pushState(transform, updated);
+                            }
+                          }}
                           style={{ backgroundColor: cp.hex }}
                           className={`w-7 h-7 rounded-full border-2 transition ${
                             annotationColor === cp.hex ? 'border-white scale-110 shadow-lg' : 'border-slate-700 opacity-80'
@@ -1400,6 +1820,164 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                     </div>
                   </div>
 
+                  {/* Stroke Width Selector */}
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                      <span>{isAr ? 'سُمك الخط' : 'Stroke Thickness'}</span>
+                      <span className="font-mono text-slate-400 text-[11px]">{annotationStrokeWidth}px</span>
+                    </h3>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {[2, 4, 6, 8].map((w) => (
+                        <button
+                          key={w}
+                          onClick={() => {
+                            setAnnotationStrokeWidth(w);
+                            if (selectedAnnotationId) {
+                              const updated = annotations.map((a) =>
+                                a.id === selectedAnnotationId ? { ...a, strokeWidth: w } : a
+                              );
+                              pushState(transform, updated);
+                            }
+                          }}
+                          className={`py-1.5 rounded-lg text-xs font-mono border transition ${
+                            annotationStrokeWidth === w
+                              ? 'bg-blue-600/30 border-blue-500 text-white font-bold'
+                              : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {w}px
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Selected Item Inspector Panel */}
+                  {selectedAnnotationId && (() => {
+                    const sel = annotations.find((a) => a.id === selectedAnnotationId);
+                    if (!sel) return null;
+                    const isRefGuide = sel.type === 'vertical_reference' || sel.type === 'horizontal_reference';
+                    const isV = sel.type === 'vertical_reference';
+                    const angleDeg = isRefGuide && sel.x1 !== undefined && sel.y1 !== undefined && sel.x2 !== undefined && sel.y2 !== undefined
+                      ? (isV
+                          ? Math.atan2(sel.x2 - sel.x1, sel.y2 - sel.y1) * (180 / Math.PI)
+                          : Math.atan2(sel.y2 - sel.y1, sel.x2 - sel.x1) * (180 / Math.PI))
+                      : 0;
+
+                    const handleSnapAlignment = () => {
+                      if (!isRefGuide || sel.x1 === undefined || sel.y1 === undefined || sel.x2 === undefined || sel.y2 === undefined) return;
+                      let updated: ImageAnnotationItem[];
+                      if (isV) {
+                        const midX = (sel.x1 + sel.x2) / 2;
+                        updated = annotations.map((a) => (a.id === sel.id ? { ...a, x1: midX, x2: midX, angle: 0 } : a));
+                      } else {
+                        const midY = (sel.y1 + sel.y2) / 2;
+                        updated = annotations.map((a) => (a.id === sel.id ? { ...a, y1: midY, y2: midY, angle: 0 } : a));
+                      }
+                      pushState(transform, updated);
+                    };
+
+                    const handleNudgeAngle = (delta: number) => {
+                      if (!isRefGuide || sel.x1 === undefined || sel.y1 === undefined || sel.x2 === undefined || sel.y2 === undefined) return;
+                      const rad = (delta * Math.PI) / 180;
+                      const midX = (sel.x1 + sel.x2) / 2;
+                      const midY = (sel.y1 + sel.y2) / 2;
+                      const halfLen = Math.hypot(sel.x2 - sel.x1, sel.y2 - sel.y1) / 2;
+                      const currentRad = Math.atan2(sel.y2 - sel.y1, sel.x2 - sel.x1);
+                      const newRad = currentRad + rad;
+                      const dx = Math.cos(newRad) * halfLen;
+                      const dy = Math.sin(newRad) * halfLen;
+                      const updated = annotations.map((a) =>
+                        a.id === sel.id
+                          ? {
+                              ...a,
+                              x1: Math.max(0, Math.min(100, midX - dx)),
+                              y1: Math.max(0, Math.min(100, midY - dy)),
+                              x2: Math.max(0, Math.min(100, midX + dx)),
+                              y2: Math.max(0, Math.min(100, midY + dy)),
+                            }
+                          : a
+                      );
+                      pushState(transform, updated);
+                    };
+
+                    const handleToggleVisibility = () => {
+                      const updated = annotations.map((a) => (a.id === sel.id ? { ...a, isHidden: !a.isHidden } : a));
+                      pushState(transform, updated);
+                    };
+
+                    return (
+                      <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-2.5">
+                        <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
+                          <span className="flex items-center gap-1.5">
+                            {isRefGuide ? <SeparatorVertical className="w-3.5 h-3.5 text-cyan-400" /> : <PenTool className="w-3.5 h-3.5 text-blue-400" />}
+                            {isRefGuide
+                              ? isV
+                                ? (isAr ? 'خط المنتصف الرأسي' : 'Facial Midline Guide')
+                                : (isAr ? 'الخط المرجعي الأفقي' : 'Horizontal Guide')
+                              : (isAr ? 'عنصر التأشير المحدد' : 'Selected Markup')}
+                          </span>
+                          <span className="text-[10px] font-mono text-cyan-400 bg-slate-800 px-2 py-0.5 rounded">
+                            {isRefGuide ? `${angleDeg.toFixed(1)}°` : sel.type}
+                          </span>
+                        </div>
+
+                        {/* Reference Line Specific Controls */}
+                        {isRefGuide && (
+                          <div className="space-y-2 pt-1 border-t border-slate-800">
+                            <div className="flex items-center justify-between text-xs text-slate-400">
+                              <span>{isV ? (isAr ? 'الميل عن الرأسي:' : 'Midline Tilt:') : (isAr ? 'الميل الإطباقي:' : 'Occlusal Cant:')}</span>
+                              <span className="font-mono text-cyan-300 font-bold">{angleDeg.toFixed(1)}°</span>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-1.5">
+                              <button
+                                onClick={() => handleNudgeAngle(-1)}
+                                className="py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs font-mono"
+                                title="Rotate -1 degree"
+                              >
+                                -1.0°
+                              </button>
+                              <button
+                                onClick={handleSnapAlignment}
+                                className="py-1 bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-800/60 rounded text-[11px] font-semibold"
+                                title={isV ? 'Snap to perfectly vertical' : 'Snap to perfectly horizontal'}
+                              >
+                                {isV ? (isAr ? 'محاذاة 0°' : 'Snap 0°') : (isAr ? 'أفقي 0°' : 'Snap 0°')}
+                              </button>
+                              <button
+                                onClick={() => handleNudgeAngle(1)}
+                                className="py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs font-mono"
+                                title="Rotate +1 degree"
+                              >
+                                +1.0°
+                              </button>
+                            </div>
+
+                            <button
+                              onClick={handleToggleVisibility}
+                              className={`w-full py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 border transition ${
+                                sel.isHidden
+                                  ? 'bg-amber-950/40 border-amber-800/60 text-amber-300 hover:bg-amber-900'
+                                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
+                              }`}
+                            >
+                              {sel.isHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                              <span>{sel.isHidden ? (isAr ? 'إظهار الخط المرجعي' : 'Show Reference Guide') : (isAr ? 'إخفاء الخط المرجعي' : 'Hide Reference Guide')}</span>
+                            </button>
+                          </div>
+                        )}
+
+                        <button
+                          onClick={handleDeleteSelectedAnnotation}
+                          className="w-full py-2 bg-rose-950/80 hover:bg-rose-900 border border-rose-800/60 text-rose-300 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                          <span>{isAr ? 'حذف العنصر المحدد' : 'Delete Annotation'}</span>
+                        </button>
+                      </div>
+                    );
+                  })()}
+
                   {/* Text Prompt Area */}
                   {pendingTextPos && (
                     <div className="p-3 bg-slate-900 border border-blue-800/60 rounded-xl space-y-2">
@@ -1409,7 +1987,7 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                         autoFocus
                         value={textInputPrompt || ''}
                         onChange={(e) => setTextInputPrompt(e.target.value)}
-                        placeholder={isAr ? 'مثال: امتصاص جذري خفيف...' : 'e.g. Incisor inclination axis...'}
+                        placeholder={isAr ? 'مثال: خط المنتصف العلوي مزاح 2 مم يميناً...' : 'e.g. Upper dental midline 2mm right...'}
                         className="w-full px-3 py-1.5 bg-slate-950 border border-slate-700 rounded text-xs text-white"
                       />
                       <button
@@ -1419,17 +1997,6 @@ export const ClinicalImageEditorModal: React.FC<ClinicalImageEditorModalProps> =
                         {isAr ? 'إضافة النص' : 'Add Text Label'}
                       </button>
                     </div>
-                  )}
-
-                  {/* Delete Selected Item */}
-                  {selectedAnnotationId && (
-                    <button
-                      onClick={handleDeleteSelectedAnnotation}
-                      className="w-full py-2 bg-rose-950/80 hover:bg-rose-900 border border-rose-800/60 text-rose-300 rounded-xl text-xs font-semibold flex items-center justify-center gap-2"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                      <span>{isAr ? 'حذف العنصر المحدد' : 'Delete Selected Annotation'}</span>
-                    </button>
                   )}
                 </div>
               )}

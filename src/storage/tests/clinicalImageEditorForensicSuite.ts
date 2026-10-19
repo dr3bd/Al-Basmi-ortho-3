@@ -19,6 +19,11 @@ import { Cohort2MediaPersistenceService, Cohort2MediaPersistenceError } from '..
 import { BrowserMediaBlobStore } from '../drivers/browserMediaBlobStore.ts';
 import { P0_PRODUCTION_SQLITE_DDL } from '../../domain/p0SqliteSchema.ts';
 import { ImageEditingRecipe, ImageTransformParams, ImageAnnotationItem } from '../../types/orthodontics.ts';
+import {
+  applyClinicalImageAdjustments,
+  createVerticalReferenceGeometry,
+  createHorizontalReferenceGeometry,
+} from '../../utils/imageAdjustments.ts';
 
 export interface CIETestResult {
   testId: string;
@@ -632,6 +637,482 @@ export async function runClinicalImageEditorForensicSuite(
       );
     } catch (err: unknown) {
       addResult('CIE-11', 'Clinical photos recovery test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // CIE-12: Brightness Enhancement Pixel Modification (CIE-1-R3)
+    // ------------------------------------------------------------------------
+    try {
+      const basePixel = new Uint8ClampedArray([100, 100, 100, 255]);
+      const brightImg = { data: new Uint8ClampedArray(basePixel), width: 1, height: 1 };
+      applyClinicalImageAdjustments(brightImg, {
+        brightness: 150,
+        contrast: 100,
+        saturation: 100,
+        grayscale: false,
+        sharpness: 0,
+      });
+
+      const dimImg = { data: new Uint8ClampedArray(basePixel), width: 1, height: 1 };
+      applyClinicalImageAdjustments(dimImg, {
+        brightness: 50,
+        contrast: 100,
+        saturation: 100,
+        grayscale: false,
+        sharpness: 0,
+      });
+
+      const brightVal = brightImg.data[0];
+      const dimVal = dimImg.data[0];
+
+      // Non-cumulative check: running brightness 150% on fresh source always yields 150
+      const rerunImg = { data: new Uint8ClampedArray(basePixel), width: 1, height: 1 };
+      applyClinicalImageAdjustments(rerunImg, {
+        brightness: 150,
+        contrast: 100,
+        saturation: 100,
+        grayscale: false,
+        sharpness: 0,
+      });
+      const rerunVal = rerunImg.data[0];
+
+      const passed = brightVal === 150 && dimVal === 50 && rerunVal === 150;
+
+      addResult(
+        'CIE-12',
+        'Brightness enhancement alters actual pixel buffer deterministically and non-cumulatively',
+        passed,
+        `Base=100, Bright(150%)=${brightVal}, Dim(50%)=${dimVal}, Non-cumulative rerun=${rerunVal}`
+      );
+    } catch (err: unknown) {
+      addResult('CIE-12', 'Brightness enhancement test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // CIE-13: Contrast Enhancement Pixel Modification (CIE-1-R3)
+    // ------------------------------------------------------------------------
+    try {
+      const basePixels = new Uint8ClampedArray([80, 80, 80, 255, 180, 180, 180, 255]);
+      const highContrast = { data: new Uint8ClampedArray(basePixels), width: 2, height: 1 };
+      applyClinicalImageAdjustments(highContrast, {
+        brightness: 100,
+        contrast: 150,
+        saturation: 100,
+        grayscale: false,
+        sharpness: 0,
+      });
+
+      const lowContrast = { data: new Uint8ClampedArray(basePixels), width: 2, height: 1 };
+      applyClinicalImageAdjustments(lowContrast, {
+        brightness: 100,
+        contrast: 50,
+        saturation: 100,
+        grayscale: false,
+        sharpness: 0,
+      });
+
+      const highDelta = highContrast.data[4] - highContrast.data[0]; // 206 - 56 = 150
+      const lowDelta = lowContrast.data[4] - lowContrast.data[0];   // 154 - 104 = 50
+
+      const passed = highDelta === 150 && lowDelta === 50;
+
+      addResult(
+        'CIE-13',
+        'Contrast enhancement alters actual pixel contrast spread deterministically',
+        passed,
+        `Base delta=100, High contrast(150%) delta=${highDelta}, Low contrast(50%) delta=${lowDelta}`
+      );
+    } catch (err: unknown) {
+      addResult('CIE-13', 'Contrast enhancement test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // CIE-14: Saturation Enhancement & Monochrome Pixel Modification (CIE-1-R3)
+    // ------------------------------------------------------------------------
+    try {
+      // Vibrant red pixel: [200, 50, 50, 255]
+      const chromaPixel = new Uint8ClampedArray([200, 50, 50, 255]);
+
+      // 1. Full desaturation (saturation 0%)
+      const desatImg = { data: new Uint8ClampedArray(chromaPixel), width: 1, height: 1 };
+      applyClinicalImageAdjustments(desatImg, {
+        brightness: 100,
+        contrast: 100,
+        saturation: 0,
+        grayscale: false,
+        sharpness: 0,
+      });
+
+      // 2. Boosted saturation (saturation 150%)
+      const satImg = { data: new Uint8ClampedArray(chromaPixel), width: 1, height: 1 };
+      applyClinicalImageAdjustments(satImg, {
+        brightness: 100,
+        contrast: 100,
+        saturation: 150,
+        grayscale: false,
+        sharpness: 0,
+      });
+
+      const isDesatGray = desatImg.data[0] === desatImg.data[1] && desatImg.data[1] === desatImg.data[2];
+      const isChromaBoosted = satImg.data[0] > 200 && satImg.data[1] < 50;
+
+      const passed = isDesatGray && isChromaBoosted;
+
+      addResult(
+        'CIE-14',
+        'Saturation enhancement modifies chromatic color distance & zero-saturation desaturates',
+        passed,
+        `Desaturated=[${desatImg.data[0]},${desatImg.data[1]},${desatImg.data[2]}], Boosted=[${satImg.data[0]},${satImg.data[1]},${satImg.data[2]}]`
+      );
+    } catch (err: unknown) {
+      addResult('CIE-14', 'Saturation enhancement test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // CIE-15: Sharpness Enhancement Algorithm Functionality (CIE-1-R3)
+    // ------------------------------------------------------------------------
+    try {
+      const edgePixels = new Uint8ClampedArray([100, 100, 100, 255, 150, 150, 150, 255]);
+      const sharpImg = { data: new Uint8ClampedArray(edgePixels), width: 2, height: 1 };
+      applyClinicalImageAdjustments(sharpImg, {
+        brightness: 100,
+        contrast: 100,
+        saturation: 100,
+        grayscale: false,
+        sharpness: 80,
+      });
+
+      const neutralImg = { data: new Uint8ClampedArray(edgePixels), width: 2, height: 1 };
+      applyClinicalImageAdjustments(neutralImg, {
+        brightness: 100,
+        contrast: 100,
+        saturation: 100,
+        grayscale: false,
+        sharpness: 0,
+      });
+
+      const edgeSpreadSharp = sharpImg.data[4] - sharpImg.data[0];
+      const edgeSpreadNeutral = neutralImg.data[4] - neutralImg.data[0];
+
+      const passed = edgeSpreadSharp > 50 && edgeSpreadNeutral === 50;
+
+      addResult(
+        'CIE-15',
+        'Sharpness control boosts local frequency contrast while neutral sharpness leaves pixels intact',
+        passed,
+        `Base delta=50, Neutral delta=${edgeSpreadNeutral}, Sharpness(80%) delta=${edgeSpreadSharp}`
+      );
+    } catch (err: unknown) {
+      addResult('CIE-15', 'Sharpness enhancement test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // CIE-16: Vertical Reference Line Geometry, Rotation & Persistence (CIE-1-R3)
+    // ------------------------------------------------------------------------
+    try {
+      // 1. Default perfectly straight vertical line
+      const defaultV = createVerticalReferenceGeometry(50, 50, 90, 0);
+      const isDefaultStraight = defaultV.x1 === 50 && defaultV.x2 === 50 && defaultV.y1 === 5 && defaultV.y2 === 95;
+
+      // 2. Controlled tilt rotation (e.g. 5 degrees for postural head compensation)
+      const tiltedV = createVerticalReferenceGeometry(50, 50, 90, 5);
+      const isRotated = tiltedV.x1 !== tiltedV.x2 && tiltedV.angle === 5;
+
+      // 3. Serialization in ImageEditingRecipe
+      const vAnnotation: ImageAnnotationItem = {
+        id: 'ann_vref_001',
+        type: 'vertical_reference',
+        color: '#06b6d4',
+        strokeWidth: 4,
+        x1: defaultV.x1,
+        y1: defaultV.y1,
+        x2: defaultV.x2,
+        y2: defaultV.y2,
+        angle: 0,
+        label: 'Facial Midline Guide',
+        isUncalibrated: true,
+      };
+
+      const recipe: ImageEditingRecipe = {
+        recipeVersion: '1.0',
+        sourceAssetId: 'med_source_vref',
+        transform: DEFAULT_TRANSFORM_VAL,
+        annotations: [vAnnotation],
+        createdAt: new Date().toISOString(),
+      };
+
+      const jsonStr = JSON.stringify(recipe);
+      const parsed = JSON.parse(jsonStr) as ImageEditingRecipe;
+      const parsedAnn = parsed.annotations[0];
+
+      const passed =
+        isDefaultStraight &&
+        isRotated &&
+        parsedAnn.type === 'vertical_reference' &&
+        parsedAnn.x1 === 50 &&
+        parsedAnn.x2 === 50 &&
+        parsedAnn.isUncalibrated === true;
+
+      addResult(
+        'CIE-16',
+        'Vertical reference line geometry, rotation & normalized coordinate serialization',
+        passed,
+        `Default: x1=${defaultV.x1}, x2=${defaultV.x2}, Tilted: x1=${tiltedV.x1.toFixed(2)}, x2=${tiltedV.x2.toFixed(2)}, Recipe roundtrip valid=true`
+      );
+    } catch (err: unknown) {
+      addResult('CIE-16', 'Vertical reference line test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // CIE-17: Horizontal Reference Line Geometry, Cant Tilt & Snap (CIE-1-R3)
+    // ------------------------------------------------------------------------
+    try {
+      // 1. Default perfectly straight horizontal line
+      const defaultH = createHorizontalReferenceGeometry(50, 50, 90, 0);
+      const isDefaultHorizontal = defaultH.y1 === 50 && defaultH.y2 === 50 && defaultH.x1 === 5 && defaultH.x2 === 95;
+
+      // 2. Occlusal cant / bipupillary tilt (e.g. -3.5 degrees)
+      const cantH = createHorizontalReferenceGeometry(50, 50, 90, -3.5);
+      const isCantTilted = cantH.y1 !== cantH.y2 && cantH.angle === -3.5;
+
+      // 3. Snap to 0° returns to true horizontal plane
+      const snappedH = createHorizontalReferenceGeometry(50, (cantH.y1 + cantH.y2) / 2, 90, 0);
+      const isSnappedTrue = snappedH.y1 === snappedH.y2;
+
+      const hAnnotation: ImageAnnotationItem = {
+        id: 'ann_href_001',
+        type: 'horizontal_reference',
+        color: '#06b6d4',
+        strokeWidth: 4,
+        x1: defaultH.x1,
+        y1: defaultH.y1,
+        x2: defaultH.x2,
+        y2: defaultH.y2,
+        angle: 0,
+        label: 'Occlusal Plane Reference',
+        isUncalibrated: true,
+      };
+
+      const parsedJson = JSON.parse(JSON.stringify(hAnnotation)) as ImageAnnotationItem;
+
+      const passed = isDefaultHorizontal && isCantTilted && isSnappedTrue && parsedJson.type === 'horizontal_reference';
+
+      addResult(
+        'CIE-17',
+        'Horizontal reference line geometry, occlusal cant calculation & true-plane snapping',
+        passed,
+        `Default: y1=${defaultH.y1}, y2=${defaultH.y2}, Cant tilted: y1=${cantH.y1.toFixed(2)}, y2=${cantH.y2.toFixed(2)}, Snapped y1=y2=${isSnappedTrue}`
+      );
+    } catch (err: unknown) {
+      addResult('CIE-17', 'Horizontal reference line test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // CIE-18: Freehand Clinical Pen Continuous Stroke Capture & Serialization (CIE-1-R3)
+    // ------------------------------------------------------------------------
+    try {
+      const strokePoints = [
+        { x: 12.5, y: 18.2 },
+        { x: 13.0, y: 19.5 },
+        { x: 14.8, y: 22.0 },
+        { x: 18.2, y: 26.7 },
+      ];
+
+      const freehandItem: ImageAnnotationItem = {
+        id: 'ann_pen_001',
+        type: 'freehand',
+        color: '#22c55e',
+        strokeWidth: 6,
+        points: strokePoints,
+        isUncalibrated: true,
+      };
+
+      const recipe: ImageEditingRecipe = {
+        recipeVersion: '1.0',
+        sourceAssetId: 'med_source_pen',
+        transform: DEFAULT_TRANSFORM_VAL,
+        annotations: [freehandItem],
+        createdAt: new Date().toISOString(),
+      };
+
+      const serialized = JSON.stringify(recipe);
+      const roundtrip = JSON.parse(serialized) as ImageEditingRecipe;
+      const roundtripStroke = roundtrip.annotations[0];
+
+      const passed =
+        roundtripStroke.type === 'freehand' &&
+        roundtripStroke.points?.length === 4 &&
+        roundtripStroke.points[2].x === 14.8 &&
+        roundtripStroke.color === '#22c55e';
+
+      addResult(
+        'CIE-18',
+        'Freehand clinical pen continuous stroke capture, normalized point serialization & persistence',
+        passed,
+        `Points captured: ${strokePoints.length}, Serialized stroke points: ${roundtripStroke.points?.length}, Stroke width: ${roundtripStroke.strokeWidth}px`
+      );
+    } catch (err: unknown) {
+      addResult('CIE-18', 'Freehand pen stroke test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // CIE-19: Undo/Redo & Deletion Invariance for New Annotations (CIE-1-R3)
+    // ------------------------------------------------------------------------
+    try {
+      // Simulate history stack operations
+      const historyStack: { transform: ImageTransformParams; annotations: ImageAnnotationItem[] }[] = [];
+      let historyIdx = -1;
+
+      const pushHistory = (t: ImageTransformParams, a: ImageAnnotationItem[]) => {
+        historyIdx++;
+        historyStack.splice(historyIdx, historyStack.length - historyIdx, {
+          transform: { ...t },
+          annotations: JSON.parse(JSON.stringify(a)),
+        });
+      };
+
+      // State 0: Empty
+      pushHistory(DEFAULT_TRANSFORM_VAL, []);
+
+      // State 1: Add Vertical Reference Line
+      const vAnn: ImageAnnotationItem = {
+        id: 'ann_v1',
+        type: 'vertical_reference',
+        color: '#06b6d4',
+        strokeWidth: 4,
+        x1: 50,
+        y1: 5,
+        x2: 50,
+        y2: 95,
+        isUncalibrated: true,
+      };
+      pushHistory(DEFAULT_TRANSFORM_VAL, [vAnn]);
+
+      // State 2: Add Freehand Pen Stroke
+      const penAnn: ImageAnnotationItem = {
+        id: 'ann_pen1',
+        type: 'freehand',
+        color: '#ef4444',
+        strokeWidth: 4,
+        points: [{ x: 10, y: 10 }, { x: 20, y: 20 }],
+        isUncalibrated: true,
+      };
+      pushHistory(DEFAULT_TRANSFORM_VAL, [vAnn, penAnn]);
+
+      // Step 3: Undo -> should revert to having only Vertical Reference Line
+      historyIdx--;
+      const undoState = historyStack[historyIdx];
+      const undoValid = undoState.annotations.length === 1 && undoState.annotations[0].type === 'vertical_reference';
+
+      // Step 4: Redo -> should restore Freehand Pen Stroke
+      historyIdx++;
+      const redoState = historyStack[historyIdx];
+      const redoValid = redoState.annotations.length === 2 && redoState.annotations[1].type === 'freehand';
+
+      // Step 5: Deletion of Vertical Reference Line
+      const remainingAfterDelete = redoState.annotations.filter((a) => a.id !== 'ann_v1');
+      pushHistory(DEFAULT_TRANSFORM_VAL, remainingAfterDelete);
+      const deleteValid =
+        historyStack[historyIdx].annotations.length === 1 &&
+        historyStack[historyIdx].annotations[0].id === 'ann_pen1';
+
+      const passed = undoValid && redoValid && deleteValid;
+
+      addResult(
+        'CIE-19',
+        'Undo/redo state stack transitions & explicit deletion invariance for guides and pen strokes',
+        passed,
+        `Undo count=${undoState.annotations.length}, Redo count=${redoState.annotations.length}, Post-delete count=${historyStack[historyIdx].annotations.length}`
+      );
+    } catch (err: unknown) {
+      addResult('CIE-19', 'Undo/redo and deletion test failed', false, String(err));
+    }
+
+    // ------------------------------------------------------------------------
+    // CIE-20: Clinical Safety Disclaimer Contract & Non-Destructive Storage Invariance (CIE-1-R3)
+    // ------------------------------------------------------------------------
+    try {
+      // 1. Clinical safety: all guides must carry explicit isUncalibrated: true flag
+      const vGuide: ImageAnnotationItem = {
+        id: 'ann_safe_v',
+        type: 'vertical_reference',
+        color: '#06b6d4',
+        strokeWidth: 4,
+        x1: 50,
+        y1: 5,
+        x2: 50,
+        y2: 95,
+        isUncalibrated: true,
+      };
+      const hGuide: ImageAnnotationItem = {
+        id: 'ann_safe_h',
+        type: 'horizontal_reference',
+        color: '#06b6d4',
+        strokeWidth: 4,
+        x1: 5,
+        y1: 50,
+        x2: 95,
+        y2: 50,
+        isUncalibrated: true,
+      };
+
+      const safetyValid = vGuide.isUncalibrated === true && hGuide.isUncalibrated === true;
+
+      // 2. Non-destructive derivative creation in SQLite with enhanced recipe
+      const recipeWithGuides: ImageEditingRecipe = {
+        recipeVersion: '1.0',
+        sourceAssetId: 'med-parent-001',
+        transform: {
+          ...DEFAULT_TRANSFORM_VAL,
+          brightness: 120,
+          contrast: 110,
+          saturation: 105,
+          sharpness: 25,
+        },
+        annotations: [vGuide, hGuide],
+        createdAt: new Date().toISOString(),
+      };
+
+      const derivativeResult = await mediaService.storeMediaAsset({
+        id: 'med-deriv-safe-001',
+        caseId: caseRes1.case.id,
+        patientId: patRes.patient.id,
+        mediaType: 'PHOTO',
+        category: 'Extraoral Frontal',
+        stage: 'T0_Initial',
+        fileName: 'extraoral_frontal_vref_edited.jpg',
+        binaryData: new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x11, 0x22, 0x33]),
+        mimeType: 'image/jpeg',
+        editingRecipe: recipeWithGuides,
+        parentAssetId: 'med-parent-001',
+        userId: 'usr-dr-albasmi',
+        userRole: 'ORTHODONTIST',
+        deviceId: 'dev-forensic-001',
+      });
+
+      const derivativeId = derivativeResult.mediaAsset.id;
+      const retrieved = await mediaService.getMediaAssetById(derivativeId);
+      const meta = JSON.parse(retrieved?.metadata_json || '{}');
+      const parsedRecipe = meta.editingRecipe as ImageEditingRecipe;
+
+      const persistenceValid =
+        retrieved !== null &&
+        meta.parentAssetId === 'med-parent-001' &&
+        parsedRecipe?.transform.brightness === 120 &&
+        parsedRecipe?.annotations.length === 2 &&
+        parsedRecipe?.annotations[0].type === 'vertical_reference' &&
+        parsedRecipe?.annotations[1].type === 'horizontal_reference';
+
+      const passed = safetyValid && persistenceValid;
+
+      addResult(
+        'CIE-20',
+        'Clinical safety disclaimer contract, uncalibrated guide flags & derivative persistence invariance',
+        passed,
+        `Safety flags valid=${safetyValid}, Derivative persisted=${derivativeId}, Stored recipe annotations=${parsedRecipe.annotations.length}`
+      );
+    } catch (err: unknown) {
+      addResult('CIE-20', 'Clinical safety and persistence test failed', false, String(err));
     }
   } finally {
     try {

@@ -251,7 +251,15 @@ export interface ImageTransformParams {
   sharpness: number;  // 0..100 (0 = default)
 }
 
-export type ImageAnnotationType = 'freehand' | 'line' | 'arrow' | 'rectangle' | 'circle' | 'text';
+export type ImageAnnotationType =
+  | 'freehand'
+  | 'line'
+  | 'arrow'
+  | 'rectangle'
+  | 'circle'
+  | 'text'
+  | 'vertical_reference'
+  | 'horizontal_reference';
 
 export interface ImageAnnotationItem {
   id: string;
@@ -266,6 +274,10 @@ export interface ImageAnnotationItem {
   text?: string;
   fontSize?: number;
   isUncalibrated?: boolean; // Safety: explicit flag for uncalibrated visual annotations
+  isLocked?: boolean;
+  isHidden?: boolean;
+  label?: string;
+  angle?: number; // Rotation / tilt angle in degrees for reference lines
 }
 
 export interface ImageEditingRecipe {
